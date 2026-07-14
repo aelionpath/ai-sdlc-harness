@@ -1,0 +1,7 @@
+<!-- ai-sdlc-harness:start -->
+AI SDLC Harness is active for this repository.
+
+Before implementation, read `.harness/generated/agent-instructions.md`.
+
+Adapter installation is not performed by `ai-sdlc init`; this template is not installed automatically.
+<!-- ai-sdlc-harness:end -->

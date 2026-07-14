@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ai-sdlc-harness"
+version = "1.0.0"
+description = "A lightweight spec-driven harness for AI-assisted software development."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "Aelion Path" }
+]
+keywords = ["ai", "sdlc", "cli", "developer-tools"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development",
+]
+dependencies = [
+  "PyYAML>=6,<7",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8,<9",
+]
+
+[project.scripts]
+ai-sdlc = "ai_sdlc_harness.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/ai-sdlc-harness/templates/harness" = [
+  "templates/harness/config.yaml",
+  "templates/harness/state.json",
+  "templates/harness/selected-packs.yaml",
+  "templates/harness/agent-instructions.md",
+]
+"share/ai-sdlc-harness/templates/task" = [
+  "templates/task/task.md",
+  "templates/task/acceptance.md",
+  "templates/task/architecture-notes.md",
+  "templates/task/coupling-notes.md",
+  "templates/task/test-contract.md",
+  "templates/task/verification.md",
+  "templates/task/evidence.md",
+]
+"share/ai-sdlc-harness/packs" = [
+  "packs/README.md",
+]
+"share/ai-sdlc-harness/adapters/codex" = [
+  "adapters/codex/AGENTS.md.template",
+]
+"share/ai-sdlc-harness/adapters/claude-code" = [
+  "adapters/claude-code/CLAUDE.md.template",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

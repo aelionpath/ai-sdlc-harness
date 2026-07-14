@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.pytest-tmp/
+pytest-cache-files-*/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Local harness output when dogfooding this repo
+.harness/
+
+# Local/private agent tooling
+.agents/
+.codex/
+.test-workspaces/
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
