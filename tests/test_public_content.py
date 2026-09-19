@@ -143,7 +143,7 @@ def test_public_metadata_uses_release_identity():
 
     assert data["build-system"]["requires"] == ["setuptools>=77.0.3", "wheel"]
     assert data["project"]["version"] == "1.0.0"
-    assert data["project"]["requires-python"] == ">=3.10"
+    assert data["project"]["requires-python"] == ">=3.11"
     assert data["project"]["license"] == "Apache-2.0"
     assert data["project"]["license-files"] == ["LICENSE", "NOTICE"]
     assert data["project"]["dependencies"] == ["PyYAML>=6,<7"]
@@ -164,6 +164,9 @@ def test_public_metadata_uses_release_identity():
     assert "Development Status :: 3 - Alpha" not in data["project"]["classifiers"]
     assert "Development Status :: 5 - Production/Stable" not in data["project"]["classifiers"]
     assert "License :: OSI Approved :: Apache Software License" not in data["project"]["classifiers"]
+    assert "Programming Language :: Python :: 3.10" not in data["project"]["classifiers"]
+    for version in ("3.11", "3.12", "3.13", "3.14"):
+        assert f"Programming Language :: Python :: {version}" in data["project"]["classifiers"]
 
 
 def test_public_installation_guidance_separates_users_from_contributors():
@@ -267,14 +270,13 @@ def test_public_ci_matrix_permissions_and_pinned_actions_are_fail_closed():
     test_job = jobs["test"]
     assert test_job["strategy"]["fail-fast"] == "false"
     assert test_job["strategy"]["matrix"]["include"] == [
-        {"os": "ubuntu-24.04", "python-version": "3.10"},
         {"os": "ubuntu-24.04", "python-version": "3.11"},
         {"os": "ubuntu-24.04", "python-version": "3.12"},
         {"os": "ubuntu-24.04", "python-version": "3.13"},
         {"os": "ubuntu-24.04", "python-version": "3.14"},
-        {"os": "windows-2022", "python-version": "3.10"},
+        {"os": "windows-2022", "python-version": "3.11"},
         {"os": "windows-2022", "python-version": "3.14"},
-        {"os": "macos-14", "python-version": "3.10"},
+        {"os": "macos-14", "python-version": "3.11"},
         {"os": "macos-14", "python-version": "3.14"},
     ]
 

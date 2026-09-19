@@ -125,5 +125,5 @@ def test_console_entry_point_is_configured():
     data = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 
     assert data["project"]["scripts"]["ai-sdlc"] == "ai_sdlc_harness.cli:main"
-    assert data["project"]["requires-python"] == ">=3.10"
+    assert data["project"]["requires-python"] == ">=3.11"
     assert "PyYAML>=6,<7" in data["project"]["dependencies"]

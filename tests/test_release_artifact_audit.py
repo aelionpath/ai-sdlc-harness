@@ -167,19 +167,29 @@ def test_auditor_accepts_exact_artifacts_and_verifies_deterministic_checksums(pr
     assert auditor.audit_release_artifacts(dist, project_root=ROOT, verify=True) == report
 
 
-def test_project_contract_parser_has_a_dependency_free_python_310_fallback(monkeypatch):
-    monkeypatch.setattr(auditor, "tomllib", None)
-
+def test_project_contract_requires_python_311_and_preserves_dependency_boundaries():
     contract = auditor.load_project_contract(ROOT)
 
     assert contract.name == "ai-sdlc-harness"
     assert contract.version == "1.0.0"
+    assert contract.requires_python == ">=3.11"
     assert contract.dependencies == ("PyYAML>=6,<7",)
     assert contract.optional_dependencies["test"] == (
         "pytest>=8,<9",
         "setuptools>=77.0.3",
         "wheel",
     )
+
+
+def test_project_contract_rejects_a_different_python_floor(project_tmp):
+    pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    (project_tmp / "pyproject.toml").write_text(
+        pyproject.replace('requires-python = ">=3.11"', 'requires-python = ">=3.12"'),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(auditor.ArtifactAuditError, match="unexpected Requires-Python"):
+        auditor.load_project_contract(project_tmp)
 
 
 @pytest.mark.parametrize(

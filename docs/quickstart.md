@@ -4,7 +4,7 @@ This walkthrough creates one task, follows the status-guided workflow to impleme
 
 ## 1. Install The Released Package
 
-AI SDLC Harness requires Python 3.10 or newer. Install it as an isolated command-line tool with `uv`:
+AI SDLC Harness requires Python 3.11 or newer. Install it as an isolated command-line tool with `uv`:
 
 ```bash
 uv tool install ai-sdlc-harness

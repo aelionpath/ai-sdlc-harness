@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 import base64
 import csv
 import email
@@ -19,16 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Iterable, Mapping, Sequence
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
-    tomllib = None
+import tomllib
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 CHECKSUM_FILENAME = "SHA256SUMS"
 EXPECTED_NORMALIZED_NAME = "ai-sdlc-harness"
 EXPECTED_RELEASE_VERSION = "1.0.0"
+EXPECTED_REQUIRES_PYTHON = ">=3.11"
 MAX_MEMBER_SIZE = 20 * 1024 * 1024
 MAX_ARCHIVE_SIZE = 100 * 1024 * 1024
 
@@ -153,75 +150,11 @@ def normalize_distribution_name(value: str) -> str:
 
 
 def _load_toml(path: Path) -> dict[str, object]:
-    if tomllib is None:  # pragma: no cover - exercised on Python 3.10
-        return _load_project_toml_subset(path)
     try:
         with path.open("rb") as file_obj:
             return tomllib.load(file_obj)
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ArtifactAuditError(f"cannot read project metadata from {path}: {exc}") from exc
-
-
-def _load_project_toml_subset(path: Path) -> dict[str, object]:
-    """Parse the controlled project tables needed by the auditor on Python 3.10."""
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        raise ArtifactAuditError(f"cannot read project metadata from {path}: {exc}") from exc
-
-    project: dict[str, object] = {}
-    optional: dict[str, object] = {}
-    urls: dict[str, object] = {}
-    scripts: dict[str, object] = {}
-    section = ""
-    index = 0
-    while index < len(lines):
-        line = lines[index].strip()
-        index += 1
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("[") and line.endswith("]"):
-            section = line[1:-1]
-            continue
-        if "=" not in line:
-            continue
-        key, value = (part.strip() for part in line.split("=", 1))
-        if value.startswith("["):
-            balance = value.count("[") - value.count("]")
-            while balance > 0 and index < len(lines):
-                continuation = lines[index].strip()
-                index += 1
-                value += "\n" + continuation
-                balance += continuation.count("[") - continuation.count("]")
-
-        destination: dict[str, object] | None = None
-        if section == "project" and key in {
-            "name",
-            "version",
-            "requires-python",
-            "license",
-            "dependencies",
-        }:
-            destination = project
-        elif section == "project.optional-dependencies":
-            destination = optional
-        elif section == "project.urls":
-            destination = urls
-        elif section == "project.scripts":
-            destination = scripts
-        if destination is None:
-            continue
-        try:
-            parsed = ast.literal_eval(value)
-        except (SyntaxError, ValueError) as exc:
-            raise ArtifactAuditError(f"unsupported project metadata syntax for {key!r}") from exc
-        destination[key] = parsed
-
-    project["optional-dependencies"] = optional
-    project["urls"] = urls
-    project["scripts"] = scripts
-    return {"project": project}
-
 
 def load_project_contract(project_root: Path = PROJECT_ROOT) -> ProjectContract:
     data = _load_toml(project_root / "pyproject.toml")
@@ -243,6 +176,10 @@ def load_project_contract(project_root: Path = PROJECT_ROOT) -> ProjectContract:
         raise ArtifactAuditError(f"unexpected project name in pyproject.toml: {name!r}")
     if version != EXPECTED_RELEASE_VERSION:
         raise ArtifactAuditError(f"unexpected release version in pyproject.toml: {version!r}")
+    if requires_python != EXPECTED_REQUIRES_PYTHON:
+        raise ArtifactAuditError(
+            f"unexpected Requires-Python in pyproject.toml: {requires_python!r}"
+        )
 
     dependencies = project.get("dependencies")
     optional = project.get("optional-dependencies")
