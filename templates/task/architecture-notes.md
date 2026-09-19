@@ -26,7 +26,9 @@ TODO: Lightly note practical architecture risks, such as broad scope, hidden cou
 
 ## Security And Privacy Risk Surface
 
-TODO: Lightly note whether this task touches user/external input, authentication, authorization, sensitive data, secrets, logs/errors, dependencies, file/network/process access, or LLM/prompt/agent/tool behavior.
+TODO: Lightly note whether this task changes a trust boundary or touches untrusted/user/external input, authentication, authorization/privilege, sensitive data, secrets, logs/errors, dependencies or security-relevant config, file/network/process access, or LLM/prompt/agent/tool behavior.
+
+TODO: When relevant, note boundary validation and safe rejection, authorization/least-privilege invariants, sensitive-data exposure risks, and dependency/config trust or capability changes.
 
 TODO: If no security or privacy-sensitive surface is expected, record not applicable. If unknown, record the open question.
 

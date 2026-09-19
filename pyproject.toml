@@ -1,23 +1,22 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77.0.3", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "ai-sdlc-harness"
 version = "1.0.0"
-description = "A lightweight spec-driven harness for AI-assisted software development."
+description = "A deterministic repo-local control layer for bounded AI-assisted software changes."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 authors = [
   { name = "Aelion Path" }
 ]
 keywords = ["ai", "sdlc", "cli", "developer-tools"]
 classifiers = [
-  "Development Status :: 4 - Beta",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
@@ -33,7 +32,17 @@ dependencies = [
 [project.optional-dependencies]
 test = [
   "pytest>=8,<9",
+  "setuptools>=77.0.3",
+  "wheel",
 ]
+
+[project.urls]
+Homepage = "https://github.com/aelionpath/ai-sdlc-harness"
+Repository = "https://github.com/aelionpath/ai-sdlc-harness"
+Documentation = "https://github.com/aelionpath/ai-sdlc-harness/tree/main/docs"
+Issues = "https://github.com/aelionpath/ai-sdlc-harness/issues"
+Changelog = "https://github.com/aelionpath/ai-sdlc-harness/releases"
+Security = "https://github.com/aelionpath/ai-sdlc-harness/security/policy"
 
 [project.scripts]
 ai-sdlc = "ai_sdlc_harness.cli:main"
@@ -42,12 +51,6 @@ ai-sdlc = "ai_sdlc_harness.cli:main"
 where = ["src"]
 
 [tool.setuptools.data-files]
-"share/ai-sdlc-harness/templates/harness" = [
-  "templates/harness/config.yaml",
-  "templates/harness/state.json",
-  "templates/harness/selected-packs.yaml",
-  "templates/harness/agent-instructions.md",
-]
 "share/ai-sdlc-harness/templates/task" = [
   "templates/task/task.md",
   "templates/task/acceptance.md",
@@ -56,15 +59,6 @@ where = ["src"]
   "templates/task/test-contract.md",
   "templates/task/verification.md",
   "templates/task/evidence.md",
-]
-"share/ai-sdlc-harness/packs" = [
-  "packs/README.md",
-]
-"share/ai-sdlc-harness/adapters/codex" = [
-  "adapters/codex/AGENTS.md.template",
-]
-"share/ai-sdlc-harness/adapters/claude-code" = [
-  "adapters/claude-code/CLAUDE.md.template",
 ]
 
 [tool.pytest.ini_options]

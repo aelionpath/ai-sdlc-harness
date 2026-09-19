@@ -103,6 +103,7 @@ def test_task_start_creates_expected_folder_files_and_manifest_entries(project_t
     slug = "fix-api-ui-validation-mismatch"
     assert code == 0
     assert f"task slug: {slug}" in messages
+    assert "root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified" in messages
     for filename in TASK_FILES:
         path = _task_path(project_tmp, slug, filename)
         assert path.is_file()
@@ -113,6 +114,8 @@ def test_task_start_creates_expected_folder_files_and_manifest_entries(project_t
     assert "expected change area" in task_text
     assert "protected areas" in task_text
     assert "external or user-visible interface impact" in task_text
+    assert "security, privacy, trust-boundary" in task_text
+    assert "authority/privilege impact" in task_text
     assert "cross-cutting impact" in task_text
     assert "## Assumptions And Open Questions" in task_text
 
@@ -121,12 +124,15 @@ def test_task_start_creates_expected_folder_files_and_manifest_entries(project_t
     assert "specific requirements inside this task" in acceptance_text
     assert "observable acceptance criteria" in acceptance_text
     assert "## Protected Behavior And Non-Goals" in acceptance_text
+    assert "authorization, sensitive-data, or safe-failure invariants" in acceptance_text
 
     architecture_text = _read(_task_path(project_tmp, slug, "architecture-notes.md"))
     assert "## Responsibility Change" in architecture_text
     assert "## Existing Patterns To Preserve" in architecture_text
     assert "## Interface And Compatibility Impact" in architecture_text
     assert "## Security And Privacy Risk Surface" in architecture_text
+    assert "changes a trust boundary" in architecture_text
+    assert "authorization/least-privilege invariants" in architecture_text
     assert "security or privacy-sensitive surface" in architecture_text
 
     coupling_text = _read(_task_path(project_tmp, slug, "coupling-notes.md"))
@@ -134,6 +140,7 @@ def test_task_start_creates_expected_folder_files_and_manifest_entries(project_t
     assert "## Maintainability Sensors" in coupling_text
     assert "hidden coupling risk" in coupling_text
     assert "dependency, config, schema" in coupling_text
+    assert "trust, maintenance, privilege, or capability risk" in coupling_text
 
     test_contract_text = _read(_task_path(project_tmp, slug, "test-contract.md"))
     assert "The harness does not generate or run tests." in test_contract_text
@@ -141,17 +148,25 @@ def test_task_start_creates_expected_folder_files_and_manifest_entries(project_t
     assert "## Desired Behavior Tests" in test_contract_text
     assert "## Regression Tests" in test_contract_text
     assert "## Negative And Edge Cases" in test_contract_text
+    assert "malformed or untrusted input" in test_contract_text
+    assert "denied or unauthorized paths" in test_contract_text
+    assert "Security-specific tests are not required when no material risk surface" in test_contract_text
     assert "automated test is not practical" in test_contract_text
+    assert "bounded manual verification approach" in test_contract_text
 
     verification_text = _read(_task_path(project_tmp, slug, "verification.md"))
-    assert "## Commands And Tests To Run" in verification_text
+    assert "## Commands And Checks Run" in verification_text
     assert "## Results" in verification_text
-    assert "not run and why" in verification_text
+    assert "## Not Run / Why" in verification_text
+    assert "actually run" in verification_text
+    assert "planned check from test-contract.md" in verification_text
 
     evidence_text = _read(_task_path(project_tmp, slug, "evidence.md"))
     assert "supports review but does not prove correctness, security, or compliance" in evidence_text
     assert "requirements addressed" in evidence_text
+    assert "material dependency, security-relevant configuration" in evidence_text
     assert "risk acceptances" in evidence_text
+    assert "manual follow-up" in evidence_text
 
     entries = {entry["path"]: entry for entry in _manifest(project_tmp)["managed_files"]}
     for filename in TASK_FILES:
@@ -335,7 +350,7 @@ def test_task_start_force_does_not_overwrite_unmanaged_existing_expected_file(pr
     assert (project_tmp / ".harness" / "manifest.json").read_bytes() == manifest_before
 
 
-def test_status_reports_task_count_and_remains_read_only(project_tmp):
+def test_selected_task_status_stays_workflow_focused_and_read_only(project_tmp):
     assert init_project(project_tmp)[0] == 0
     assert start_task(project_tmp, "Count me")[0] == 0
     tracked = [project_tmp / relative for relative in BASE_MANAGED_FILES]
@@ -345,8 +360,9 @@ def test_status_reports_task_count_and_remains_read_only(project_tmp):
     after = {path: path.read_bytes() for path in tracked}
 
     assert code == 0
-    assert "task folders: 1" in messages
-    assert "adoption scope: task-local" in messages
+    assert "task: count-me" in messages
+    assert "phase: task_definition" in messages
+    assert "task folders: 1" not in messages
     assert before == after
 
 
@@ -371,15 +387,15 @@ def test_verify_fails_when_manifest_managed_task_file_is_missing(project_tmp):
     assert any("missing file .harness/tasks/verify-missing/evidence.md" in message for message in messages)
 
 
-def test_verify_fails_when_manifest_managed_task_file_hash_drifts(project_tmp):
+def test_verify_allows_manifest_managed_human_source_hash_drift(project_tmp):
     assert init_project(project_tmp)[0] == 0
     assert start_task(project_tmp, "Verify drift")[0] == 0
     _task_path(project_tmp, "verify-drift", "evidence.md").write_text("changed\n", encoding="utf-8")
 
     code, messages = verify_project(project_tmp)
 
-    assert code == 1
-    assert any("hash drift detected for .harness/tasks/verify-drift/evidence.md" in message for message in messages)
+    assert code == 0
+    assert messages == ["AI SDLC Harness verification passed"]
 
 
 def test_verify_fails_for_unsafe_task_directory_name(project_tmp):

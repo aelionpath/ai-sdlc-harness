@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -18,9 +19,10 @@ from .constants import (
     MANAGED_FILE_PATHS,
     TEMPLATE_VERSION,
 )
+from .context import _DEFAULT_BUDGET_CONFIGURATION
 from .detect import detect_project_signals
 from .files import resolve_under_root, write_text
-from .manifest import write_manifest
+from .manifest import build_managed_file_record, update_managed_file_records, write_manifest
 
 
 def _timestamp() -> str:
@@ -31,6 +33,7 @@ def _adapter_config(agent: str) -> dict[str, str]:
     return {
         "codex": "requested-deferred" if agent in {"codex", "both"} else "not-installed",
         "claude_code": "requested-deferred" if agent in {"claude-code", "both"} else "not-installed",
+        "gemini_cli": "requested-deferred" if agent == "gemini-cli" else "not-installed",
     }
 
 
@@ -41,6 +44,7 @@ def build_config(root: Path, agent: str) -> dict[str, Any]:
         "template_version": TEMPLATE_VERSION,
         "adoption_scope": DEFAULT_ADOPTION_SCOPE,
         "selected_packs": list(DEFAULT_SELECTED_PACKS),
+        "context_budget": asdict(_DEFAULT_BUDGET_CONFIGURATION),
         "adapters": _adapter_config(agent),
         "project": {
             "git_repo": signals["git_repo"],
@@ -105,7 +109,7 @@ def init_project(root: Path, *, agent: str = "none", dry_run: bool = False, forc
 
     messages: list[str] = []
     contents = _managed_contents(root, agent)
-    managed_content_changed = False
+    created_managed_paths: list[PurePosixPath] = []
 
     for directory in EXPECTED_DIRECTORIES:
         target = resolve_under_root(root, directory)
@@ -121,28 +125,37 @@ def init_project(root: Path, *, agent: str = "none", dry_run: bool = False, forc
         if managed_path.as_posix() not in known_managed:
             return 2, [f"Refusing unknown managed path: {managed_path.as_posix()}"]
         target = resolve_under_root(root, managed_path)
-        if target.exists() and not force:
+        existed = target.exists()
+        if existed and not force:
             messages.append(f"skip existing file {managed_path.as_posix()}")
             continue
-        action = "would rewrite" if target.exists() and force and dry_run else None
-        action = action or ("rewrite" if target.exists() and force else None)
+        action = "would rewrite" if existed and force and dry_run else None
+        action = action or ("rewrite" if existed and force else None)
         action = action or ("would create" if dry_run else "create")
         messages.append(f"{action} file {managed_path.as_posix()}")
         if not dry_run:
             write_text(target, content)
-            managed_content_changed = True
+            if not existed:
+                created_managed_paths.append(managed_path)
 
     manifest_path = PurePosixPath(".harness/manifest.json")
     manifest_target = resolve_under_root(root, manifest_path)
     if dry_run:
         messages.append("would create manifest .harness/manifest.json" if not manifest_target.exists() else "would refresh manifest .harness/manifest.json")
-    elif manifest_target.exists() and not force and not managed_content_changed:
-        messages.append("skip existing manifest .harness/manifest.json")
+    elif manifest_target.exists() and not force:
+        if not created_managed_paths:
+            messages.append("skip existing manifest .harness/manifest.json")
+        else:
+            update_managed_file_records(
+                root,
+                [build_managed_file_record(root, path) for path in created_managed_paths],
+            )
+            messages.append("refreshed manifest .harness/manifest.json")
     else:
-        write_manifest(root)
+        write_manifest(root, upgrade_to_v2=force)
         messages.append("refreshed manifest .harness/manifest.json")
 
     if agent != "none":
         messages.append("adapter installation is not performed by init; request recorded in config")
-    messages.append("root AGENTS.md and CLAUDE.md were not modified")
+    messages.append("root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified")
     return 0, messages

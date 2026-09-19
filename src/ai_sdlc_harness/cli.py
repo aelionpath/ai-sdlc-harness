@@ -6,6 +6,7 @@ import argparse
 from pathlib import Path
 from typing import Sequence
 
+from .adapters import ADAPTER_IDS, install_adapters
 from .constants import AGENT_CHOICES, HARNESS_VERSION, PRODUCT_NAME
 from .evidence import run_evidence
 from .generate import run_generate
@@ -22,7 +23,7 @@ from .verify import verify_project
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ai-sdlc",
-        description=f"{PRODUCT_NAME}: a lightweight spec-driven harness for AI-assisted software development.",
+        description=f"{PRODUCT_NAME}: deterministic repo-local control for bounded, reviewable AI-assisted software changes.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {HARNESS_VERSION}")
     subparsers = parser.add_subparsers(dest="command")
@@ -37,7 +38,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Record a requested agent adapter. Init records the request but does not install adapters.",
     )
 
-    subparsers.add_parser("status", help="Show read-only harness status.")
+    status_parser = subparsers.add_parser(
+        "status",
+        help="Show read-only workflow status.",
+        description="Show read-only workflow status.",
+    )
+    status_parser.add_argument(
+        "--task", help="Explicit existing safe task slug to inspect."
+    )
+    adapter_parser = subparsers.add_parser(
+        "adapter",
+        help="Manage explicit repository-scoped agent adapters.",
+    )
+    adapter_subparsers = adapter_parser.add_subparsers(dest="adapter_command")
+    adapter_install_parser = adapter_subparsers.add_parser(
+        "install",
+        help="Install a native repository Agent Skill.",
+    )
+    adapter_install_parser.add_argument(
+        "adapter_id",
+        choices=(*ADAPTER_IDS, "all"),
+        help="Adapter ID to install, or all.",
+    )
+    adapter_install_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show planned adapter changes without writing files.",
+    )
+    adapter_install_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Restore or refresh only an existing Harness-managed adapter skill.",
+    )
+    status_parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit deterministic machine-readable workflow status.",
+    )
     subparsers.add_parser("verify", help="Verify harness structure and protected file hashes.")
     preflight_parser = subparsers.add_parser("preflight", help="Create a task-readiness preflight report.")
     preflight_parser.add_argument("--task", required=True, help="Existing safe task slug.")
@@ -64,7 +101,7 @@ def build_parser() -> argparse.ArgumentParser:
     generate_parser.add_argument(
         "--force",
         action="store_true",
-        help="Rewrite manifest-managed generated/agent-workset.md only.",
+        help="Rewrite manifest-managed generate-owned outputs for the selected task only.",
     )
     evidence_parser = subparsers.add_parser("evidence", help="Create a deterministic task-scoped evidence report.")
     evidence_parser.add_argument("--task", required=True, help="Existing safe task slug.")
@@ -99,7 +136,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "init":
         code, messages = init_project(root, agent=args.agent, dry_run=args.dry_run, force=args.force)
     elif args.command == "status":
-        code, messages = status_project(root)
+        code, messages = status_project(
+            root,
+            task_slug=args.task,
+            json_output=args.json,
+        )
+    elif args.command == "adapter" and args.adapter_command == "install":
+        code, messages = install_adapters(
+            root,
+            args.adapter_id,
+            dry_run=args.dry_run,
+            force=args.force,
+        )
+    elif args.command == "adapter":
+        parser.print_help()
+        return 0
     elif args.command == "verify":
         code, messages = verify_project(root)
     elif args.command == "preflight":

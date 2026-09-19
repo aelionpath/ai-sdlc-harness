@@ -10,6 +10,6 @@ TODO: Note whether the coupling is visible, stable, and tested.
 
 TODO: Note any hidden coupling risk, such as shared state, implicit ordering, broad imports, or behavior that depends on side effects.
 
-TODO: Note dependency, config, schema, file-format, prompt, or external-service coupling introduced or changed by this task.
+TODO: Note dependency, config, schema, file-format, prompt, or external-service coupling introduced or changed by this task, including material trust, maintenance, privilege, or capability risk where relevant.
 
 TODO: Record exceptions or justified coupling that should be accepted for this task.

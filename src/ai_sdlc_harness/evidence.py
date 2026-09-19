@@ -401,7 +401,7 @@ def _trace_sections(by_name: dict[str, ArtifactStatus]) -> dict[str, SectionEvid
     verification_commands = _section_evidence(
         verification,
         "Verification commands",
-        ("Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands", "Commands", "Tests"),
+        ("Commands And Checks Run", "Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands", "Commands", "Tests"),
     )
     evidence_results = _section_evidence(
         evidence,
@@ -874,7 +874,7 @@ def run_evidence(root: Path, task_slug: str, *, dry_run: bool = False, force: bo
     _write_manifest_for_evidence_report(root, evidence_report_path, report_target)
     messages.append(f"{action} file {path_text}")
     messages.append("refreshed manifest .harness/manifest.json")
-    messages.append("root AGENTS.md and CLAUDE.md were not modified")
+    messages.append("root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified")
     messages.append(".harness/generated/agent-instructions.md was not modified")
     messages.append(f".harness/tasks/{task_slug}/generated/agent-workset.md was not modified")
     return 0, messages

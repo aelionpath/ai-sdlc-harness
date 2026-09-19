@@ -257,5 +257,5 @@ def start_task(root: Path, title: str, *, dry_run: bool = False, force: bool = F
     else:
         messages.append("skip existing manifest .harness/manifest.json")
 
-    messages.append("root AGENTS.md and CLAUDE.md were not modified")
+    messages.append("root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified")
     return 0, messages

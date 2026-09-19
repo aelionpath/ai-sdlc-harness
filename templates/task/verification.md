@@ -1,17 +1,17 @@
 # Verification
 
-## Commands And Tests To Run
+## Commands And Checks Run
 
-TODO: List exact commands intended to be run after implementation.
-
-TODO: Note expected unit, focused, regression, or integration coverage.
+TODO: Record the exact commands and manual checks actually run.
 
 ## Results
 
-TODO: Record actual command results, including passed, failed, skipped, or not run.
+TODO: Record observed results, including passed, failed, or skipped checks.
 
-TODO: For any expected command or test not run, record not run and why.
+## Not Run / Why
+
+TODO: Record any planned check from test-contract.md that was not run and why.
 
 ## Manual Review Notes
 
-TODO: Record manual review checks, unresolved review questions, or follow-up verification needed.
+TODO: Record manual review checks actually performed and their observed results.

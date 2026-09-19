@@ -221,6 +221,28 @@ def validate_requirements_data(data: Any, expected_slug: str | None = None) -> R
     )
 
 
+def parse_requirements_text(text: str, expected_slug: str | None = None) -> RequirementsReadResult:
+    """Parse and validate one already-captured requirements document."""
+
+    if not isinstance(text, str):
+        raise TypeError("requirements text must be a string")
+    try:
+        data = yaml.safe_load(text)
+    except Exception as exc:
+        return RequirementsReadResult(
+            True,
+            True,
+            False,
+            f"malformed YAML: {exc}",
+            0,
+            0,
+            [],
+            [],
+            [f"requirements.yaml is malformed YAML: {exc}"],
+        )
+    return validate_requirements_data(data, expected_slug=expected_slug)
+
+
 def read_requirements(root: Path, slug: str) -> RequirementsReadResult:
     target = resolve_under_root(root, requirements_path(slug))
     if not target.exists():
@@ -231,8 +253,4 @@ def read_requirements(root: Path, slug: str) -> RequirementsReadResult:
         text = read_text(target)
     except Exception as exc:
         return RequirementsReadResult(True, False, False, f"unreadable: {exc}", 0, 0, [], [], [f"requirements.yaml is unreadable: {exc}"])
-    try:
-        data = yaml.safe_load(text)
-    except Exception as exc:
-        return RequirementsReadResult(True, True, False, f"malformed YAML: {exc}", 0, 0, [], [], [f"requirements.yaml is malformed YAML: {exc}"])
-    return validate_requirements_data(data, expected_slug=slug)
+    return parse_requirements_text(text, expected_slug=slug)

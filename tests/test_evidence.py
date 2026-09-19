@@ -585,7 +585,7 @@ def test_evidence_does_not_overwrite_task_inputs_or_global_generated_files(proje
 
     assert code == 0
     assert {path: path.read_bytes() for path in tracked} == tracked
-    assert "root AGENTS.md and CLAUDE.md were not modified" in messages
+    assert "root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified" in messages
     assert ".harness/generated/agent-instructions.md was not modified" in messages
     assert ".harness/tasks/evidence-me/generated/agent-workset.md was not modified" in messages
 

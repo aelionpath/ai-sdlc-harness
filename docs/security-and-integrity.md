@@ -5,10 +5,10 @@ AI SDLC Harness implements a small safety baseline for repo-local harness artifa
 ## Safety Baseline
 
 - Uses `pathlib` based path handling.
-- Restricts managed writes to `.harness/`.
+- Restricts workflow-artifact writes to `.harness/` and explicit adapter writes to three repository-scoped `SKILL.md` paths.
 - Rejects absolute managed-output paths.
 - Rejects path traversal.
-- Never modifies existing root `AGENTS.md` or `CLAUDE.md`.
+- Never modifies existing root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`.
 - Records adapter requests only; `init` does not install adapters.
 - Does not execute arbitrary project commands.
 - Redacts obvious secret-like values from CLI output.
@@ -50,6 +50,7 @@ Generated task reports and worksets are also manifest-managed and hashed when cr
 .harness/tasks/<task-slug>/requirements.yaml
 .harness/tasks/<task-slug>/test-contract-review.md
 .harness/tasks/<task-slug>/generated/agent-workset.md
+.harness/tasks/<task-slug>/generated/context-manifest.yaml
 .harness/tasks/<task-slug>/evidence-report.md
 .harness/tasks/<task-slug>/validation-report.md
 ```
@@ -65,7 +66,7 @@ Report and workset commands write only their own selected task output:
 - `preflight` writes `preflight.md`
 - `spec` writes `spec.md` and `requirements.yaml`
 - `test-contract` writes `test-contract-review.md`
-- `generate` writes `generated/agent-workset.md`
+- `generate` writes `generated/agent-workset.md` and `generated/context-manifest.yaml`
 - `evidence` writes `evidence-report.md`
 - `validate` writes `validation-report.md`
 
@@ -79,9 +80,17 @@ Commands may report missing or hash-drifted manifest-managed task artifacts that
 
 `verify` checks recorded hashes for protected managed files and generated task artifacts. It reports missing or modified managed files, but it does not decide whether task content is semantically correct.
 
-## Root Agent Files
+## Adapter Skills And Root Agent Files
 
-The current command surface does not modify root `AGENTS.md` or `CLAUDE.md`.
+Explicit `ai-sdlc adapter install` writes only these manifest-managed repository Agent Skills:
+
+```text
+.agents/skills/ai-sdlc-harness/SKILL.md
+.claude/skills/ai-sdlc-harness/SKILL.md
+.gemini/skills/ai-sdlc-harness/SKILL.md
+```
+
+Existing unmanaged files at those paths block installation and are not adopted or overwritten. The command surface does not modify root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`.
 
 `ai-sdlc init --agent ...` records the requested adapter choice in harness state, but it does not install adapters and does not write root agent instruction files.
 

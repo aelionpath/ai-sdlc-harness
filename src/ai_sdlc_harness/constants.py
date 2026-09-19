@@ -13,7 +13,13 @@ HARNESS_VERSION = "1.0.0"
 TEMPLATE_VERSION = "1.0.0"
 DEFAULT_ADOPTION_SCOPE = "task-local"
 
-AGENT_CHOICES = ("none", "codex", "claude-code", "both")
+AGENT_CHOICES = ("none", "codex", "claude-code", "gemini-cli", "both")
+
+ADAPTER_ARTIFACT_PATHS = (
+    PurePosixPath(".agents/skills/ai-sdlc-harness/SKILL.md"),
+    PurePosixPath(".claude/skills/ai-sdlc-harness/SKILL.md"),
+    PurePosixPath(".gemini/skills/ai-sdlc-harness/SKILL.md"),
+)
 
 DEFAULT_SELECTED_PACKS: tuple[str, ...] = ()
 
@@ -51,6 +57,7 @@ EVIDENCE_REPORT_FILENAME = "evidence-report.md"
 VALIDATION_REPORT_FILENAME = "validation-report.md"
 TASK_GENERATED_DIRNAME = "generated"
 AGENT_WORKSET_FILENAME = "agent-workset.md"
+CONTEXT_MANIFEST_FILENAME = "context-manifest.yaml"
 
 MANIFEST_MANAGED_TASK_FILENAMES = (
     *TASK_ARTIFACT_FILENAMES,

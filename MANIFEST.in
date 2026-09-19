@@ -1,0 +1,36 @@
+include LICENSE
+include NOTICE
+include README.md
+include pyproject.toml
+include MANIFEST.in
+
+recursive-include src/ai_sdlc_harness *.py
+include templates/task/task.md
+include templates/task/acceptance.md
+include templates/task/architecture-notes.md
+include templates/task/coupling-notes.md
+include templates/task/test-contract.md
+include templates/task/verification.md
+include templates/task/evidence.md
+
+prune tests
+prune docs
+prune examples
+prune packs
+prune .github
+prune release
+prune planning
+prune scripts
+prune research
+prune scratch
+prune .agents
+prune .codex
+prune .test-workspaces
+prune .harness
+prune build
+prune dist
+global-exclude *.py[cod]
+global-exclude __pycache__
+global-exclude .pytest_cache
+global-exclude .DS_Store
+global-exclude Thumbs.db

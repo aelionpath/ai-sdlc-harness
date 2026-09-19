@@ -17,6 +17,8 @@ TODO: List protected areas, files, behavior, or workflows that should not change
 
 TODO: Note any external or user-visible interface impact, such as API, CLI, schema, config, file format, prompt, agent-tool, or documented behavior changes.
 
+TODO: Note any material security, privacy, trust-boundary, protected-resource, or authority/privilege impact when relevant; otherwise record not applicable.
+
 TODO: Note whether the change is expected to stay local or may have cross-cutting impact.
 
 ## Assumptions And Open Questions

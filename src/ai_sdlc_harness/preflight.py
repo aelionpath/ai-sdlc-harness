@@ -6,14 +6,34 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 import yaml
 
 from .constants import PREFLIGHT_FILENAME, TASK_ARTIFACT_FILENAMES, TASK_SLUG_PATTERN
 from .detect import detect_project_signals
-from .files import read_text, resolve_under_root, write_text
-from .manifest import load_manifest, sha256_file, write_manifest
+from .files import (
+    persist_exact_bytes,
+    resolve_managed_output_under_root,
+    resolve_under_root,
+)
+from .lineage import (
+    CapturedDependency,
+    build_provenance_record,
+    capture_dependencies,
+    lineage_definition_for_task,
+    provenance_dependencies,
+    snapshot_repository_observations,
+)
+from .manifest import (
+    build_managed_file_record,
+    load_manifest,
+    load_manifest_model,
+    persist_manifest_model,
+    remove_provenance_records,
+    replace_managed_and_provenance_records,
+    sha256_file,
+)
 
 
 TASK_SLUG_RE = re.compile(TASK_SLUG_PATTERN)
@@ -218,12 +238,18 @@ def _readiness_state(text: str) -> str:
     return "ready"
 
 
-def _artifact_readiness(root: Path, slug: str) -> list[ArtifactReadiness]:
+def _artifact_readiness(
+    slug: str,
+    captured: Mapping[str, CapturedDependency],
+) -> list[ArtifactReadiness]:
     readiness: list[ArtifactReadiness] = []
     for filename in TASK_ARTIFACT_FILENAMES:
-        relative = PurePosixPath(".harness") / "tasks" / slug / filename
-        target = resolve_under_root(root, relative)
-        if not target.exists():
+        path_text = (
+            PurePosixPath(".harness") / "tasks" / slug / filename
+        ).as_posix()
+        capture = captured[path_text]
+        state = capture.record.dependency_state
+        if state == "missing":
             readiness.append(
                 ArtifactReadiness(
                     filename=filename,
@@ -234,7 +260,7 @@ def _artifact_readiness(root: Path, slug: str) -> list[ArtifactReadiness]:
                 )
             )
             continue
-        if not target.is_file():
+        if state == "not_regular":
             readiness.append(
                 ArtifactReadiness(
                     filename=filename,
@@ -245,8 +271,20 @@ def _artifact_readiness(root: Path, slug: str) -> list[ArtifactReadiness]:
                 )
             )
             continue
+        if state == "unreadable":
+            readiness.append(
+                ArtifactReadiness(
+                    filename=filename,
+                    present=True,
+                    readable=False,
+                    state="unreadable",
+                    message="unreadable file",
+                )
+            )
+            continue
         try:
-            text = read_text(target)
+            assert capture.content is not None
+            text = capture.content.decode("utf-8")
         except Exception as exc:
             readiness.append(
                 ArtifactReadiness(
@@ -273,10 +311,14 @@ def _artifact_readiness(root: Path, slug: str) -> list[ArtifactReadiness]:
     return readiness
 
 
-def _load_selected_packs(root: Path) -> list[dict[str, Any]]:
-    selected_path = resolve_under_root(root, ".harness/packs/selected.yaml")
+def _load_selected_packs(
+    capture: CapturedDependency,
+) -> list[dict[str, Any]]:
+    if capture.record.dependency_state != "present":
+        return []
     try:
-        loaded = yaml.safe_load(read_text(selected_path))
+        assert capture.content is not None
+        loaded = yaml.safe_load(capture.content.decode("utf-8"))
     except Exception:
         return []
     if not isinstance(loaded, dict):
@@ -398,11 +440,11 @@ def _findings(signals: dict[str, Any], readiness: list[ArtifactReadiness]) -> li
     if verification and verification.readable:
         commands_state = _section_state(
             verification.text,
-            ("Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands"),
+            ("Commands And Checks Run", "Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands"),
         )
         results_state = _section_state(verification.text, ("Results", "Verification Results"))
         if not _ready(commands_state):
-            findings.append(Finding("warning", "verification command intent is missing or still TODO."))
+            findings.append(Finding("warning", "no verification commands or checks are recorded as run."))
         if not _ready(results_state):
             findings.append(Finding("warning", "verification results are not recorded yet."))
 
@@ -433,8 +475,10 @@ def _recommended_actions(findings: list[Finding]) -> list[str]:
         actions.append("Fill in architecture, responsibility, coupling, and maintainability notes.")
     if any("security/privacy" in finding.message for finding in warnings):
         actions.append("Record whether the task touches security or privacy-sensitive surfaces, or mark not applicable.")
-    if any("test intent" in finding.message or "verification command" in finding.message for finding in warnings):
-        actions.append("Record intended tests and verification commands before implementation.")
+    if any("test intent" in finding.message for finding in warnings):
+        actions.append("Record planned test and verification intent in test-contract.md before implementation.")
+    if any("verification commands" in finding.message for finding in warnings):
+        actions.append("After implementation, record the commands and checks actually run in verification.md.")
     if any("verification results" in finding.message for finding in warnings):
         actions.append("Record verification results after implementation, or note not run and why.")
     if not actions:
@@ -538,7 +582,7 @@ def _render_report(
         _readiness_line(
             by_name.get("verification.md"),
             "Verification commands",
-            ("Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands"),
+            ("Commands And Checks Run", "Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands"),
         ),
         _readiness_line(by_name.get("verification.md"), "Verification results", ("Results", "Verification Results")),
         "",
@@ -624,7 +668,10 @@ def run_preflight(root: Path, task_slug: str, *, dry_run: bool = False, force: b
 
     preflight_path = _preflight_path(task_slug)
     try:
-        preflight_target = resolve_under_root(root, preflight_path)
+        preflight_target = resolve_managed_output_under_root(
+            root,
+            preflight_path,
+        )
         entries = _load_manifest_entries(root)
     except Exception as exc:
         return 1, [f"Could not read harness manifest or resolve preflight path: {exc}"]
@@ -647,18 +694,40 @@ def run_preflight(root: Path, task_slug: str, *, dry_run: bool = False, force: b
                 "refusing to overwrite manifest-managed preflight report without --force",
             ]
 
+    try:
+        expected = lineage_definition_for_task("preflight", task_slug)
+        captures = capture_dependencies(root, expected)
+        dependency_snapshot = provenance_dependencies(captures)
+        captured_by_path = {
+            item.record.dependency_path: item for item in captures
+        }
+        observation_snapshot = snapshot_repository_observations(root, expected)
+    except Exception as exc:
+        return 1, [f"Could not snapshot preflight provenance inputs: {exc}"]
+
     signals = detect_project_signals(root)
-    readiness = _artifact_readiness(root, task_slug)
-    selected_packs = _load_selected_packs(root)
+    readiness = _artifact_readiness(task_slug, captured_by_path)
+    selected_packs = _load_selected_packs(
+        captured_by_path[".harness/packs/selected.yaml"]
+    )
     findings = _findings(signals, readiness)
+    generated_at = _timestamp()
     content = _render_report(
         slug=task_slug,
-        generated_at=_timestamp(),
+        generated_at=generated_at,
         signals=signals,
         selected_packs=selected_packs,
         readiness=readiness,
         findings=findings,
     )
+    try:
+        stable_observations = snapshot_repository_observations(root, expected)
+    except Exception as exc:
+        return 1, [f"Could not confirm preflight repository observations: {exc}"]
+    if stable_observations != observation_snapshot:
+        return 1, [
+            "Repository observations changed during preflight; no files written."
+        ]
 
     messages = [f"preflight report: {path_text}", _summarize(findings)]
     if dry_run:
@@ -667,15 +736,54 @@ def run_preflight(root: Path, task_slug: str, *, dry_run: bool = False, force: b
         messages.append("dry run; no files written")
         return 0, messages
 
-    if preflight_target.exists() and preflight_target.read_text(encoding="utf-8") == content:
-        messages.append(f"skip unchanged file {path_text}")
-        messages.append("skip existing manifest .harness/manifest.json")
-        return 0, messages
+    content_bytes = content.encode("utf-8")
+    existed_before = preflight_target.exists()
+    try:
+        output_will_change = (
+            not existed_before or preflight_target.read_bytes() != content_bytes
+        )
+        if output_will_change:
+            manifest_path = resolve_under_root(root, ".harness/manifest.json")
+            current_manifest = load_manifest_model(manifest_path)
+            invalidated = remove_provenance_records(
+                current_manifest,
+                [path_text],
+                generated_at=generated_at,
+            )
+            if invalidated != current_manifest:
+                persist_manifest_model(root, invalidated)
 
-    action = "refresh" if preflight_target.exists() else "create"
-    write_text(preflight_target, content)
-    write_manifest(root, extra_managed_paths=[preflight_path])
-    messages.append(f"{action} file {path_text}")
-    messages.append("refreshed manifest .harness/manifest.json")
-    messages.append("root AGENTS.md and CLAUDE.md were not modified")
+        persisted = persist_exact_bytes(preflight_target, content_bytes)
+        provenance = build_provenance_record(
+            expected,
+            output_sha256=persisted.sha256,
+            dependencies=dependency_snapshot,
+            repository_observations=observation_snapshot,
+        )
+        managed = build_managed_file_record(root, path_text)
+        manifest_path = resolve_under_root(root, ".harness/manifest.json")
+        current_manifest = load_manifest_model(manifest_path)
+        updated_manifest = replace_managed_and_provenance_records(
+            current_manifest,
+            [managed],
+            [provenance],
+            generated_at=generated_at,
+            upgrade_to_v2=True,
+        )
+        manifest_changed = updated_manifest != current_manifest
+        if manifest_changed:
+            persist_manifest_model(root, updated_manifest)
+    except Exception as exc:
+        return 1, [f"Could not persist preflight report and provenance: {exc}"]
+
+    if persisted.changed:
+        action = "refresh" if existed_before else "create"
+        messages.append(f"{action} file {path_text}")
+    else:
+        messages.append(f"skip unchanged file {path_text}")
+    if manifest_changed:
+        messages.append("refreshed manifest .harness/manifest.json")
+        messages.append("root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified")
+    else:
+        messages.append("skip existing manifest .harness/manifest.json")
     return 0, messages

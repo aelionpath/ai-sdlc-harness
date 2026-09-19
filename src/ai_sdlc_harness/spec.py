@@ -6,11 +6,30 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from .constants import REQUIREMENTS_FILENAME, SPEC_FILENAME, TASK_ARTIFACT_FILENAMES, TASK_SLUG_PATTERN
-from .files import read_text, resolve_under_root, write_text
-from .manifest import load_manifest, sha256_file, write_manifest
+from .files import (
+    persist_exact_bytes,
+    resolve_managed_output_under_root,
+    resolve_under_root,
+)
+from .lineage import (
+    CapturedDependency,
+    build_provenance_record,
+    capture_dependencies,
+    lineage_definition_for_task,
+    provenance_dependencies,
+)
+from .manifest import (
+    build_managed_file_record,
+    load_manifest,
+    load_manifest_model,
+    persist_manifest_model,
+    remove_provenance_records,
+    replace_managed_and_provenance_records,
+    sha256_file,
+)
 from .redact import redact_text
 from .requirements import build_requirements_document, render_requirements_yaml, requirements_path
 from .task_metadata import extract_task_title
@@ -110,32 +129,66 @@ def _load_manifest_entries(root: Path) -> dict[str, dict[str, Any]]:
     return {str(entry.get("path")): entry for entry in entries if isinstance(entry, dict)}
 
 
-def _read_source_artifact(root: Path, slug: str, filename: str) -> SourceArtifact:
-    relative = _artifact_path(slug, filename)
-    target = resolve_under_root(root, relative)
-    if not target.exists():
+def _source_artifact_from_capture(
+    filename: str,
+    capture: CapturedDependency,
+) -> SourceArtifact:
+    state = capture.record.dependency_state
+    if state == "missing":
         return SourceArtifact(filename, present=False, readable=False, text="", message="missing")
-    if not target.is_file():
+    if state == "not_regular":
         return SourceArtifact(filename, present=True, readable=False, text="", message="not a regular file")
+    if state == "unreadable":
+        return SourceArtifact(filename, present=True, readable=False, text="", message="unreadable")
     try:
-        return SourceArtifact(filename, present=True, readable=True, text=read_text(target), message="present")
+        assert capture.content is not None
+        text = capture.content.decode("utf-8")
+        return SourceArtifact(
+            filename,
+            present=True,
+            readable=True,
+            text=text,
+            message="present",
+        )
     except Exception as exc:
         return SourceArtifact(filename, present=True, readable=False, text="", message=f"unreadable: {exc}")
 
 
-def _read_source_artifacts(root: Path, slug: str) -> list[SourceArtifact]:
-    return [_read_source_artifact(root, slug, filename) for filename in TASK_ARTIFACT_FILENAMES]
+def _read_source_artifacts(
+    slug: str,
+    captured: Mapping[str, CapturedDependency],
+) -> list[SourceArtifact]:
+    return [
+        _source_artifact_from_capture(
+            filename,
+            captured[_artifact_path(slug, filename).as_posix()],
+        )
+        for filename in TASK_ARTIFACT_FILENAMES
+    ]
 
 
-def _read_preflight(root: Path, slug: str) -> OptionalReport:
-    relative = _artifact_path(slug, "preflight.md")
-    target = resolve_under_root(root, relative)
-    if not target.exists():
+def _read_preflight(
+    slug: str,
+    captured: Mapping[str, CapturedDependency],
+) -> OptionalReport:
+    capture = captured[_artifact_path(slug, "preflight.md").as_posix()]
+    state = capture.record.dependency_state
+    if state == "missing":
         return OptionalReport("preflight.md", present=False, readable=False, text="", message="missing")
-    if not target.is_file():
+    if state == "not_regular":
         return OptionalReport("preflight.md", present=True, readable=False, text="", message="not a regular file")
+    if state == "unreadable":
+        return OptionalReport("preflight.md", present=True, readable=False, text="", message="unreadable")
     try:
-        return OptionalReport("preflight.md", present=True, readable=True, text=read_text(target), message="present")
+        assert capture.content is not None
+        text = capture.content.decode("utf-8")
+        return OptionalReport(
+            "preflight.md",
+            present=True,
+            readable=True,
+            text=text,
+            message="present",
+        )
     except Exception as exc:
         return OptionalReport("preflight.md", present=True, readable=False, text="", message=f"unreadable: {exc}")
 
@@ -323,7 +376,7 @@ def _readiness_findings(
     if not any(section.state == "ready" for section in test_sections):
         findings.append(Finding("warning", "test expectations are missing or TODO-only."))
     if not any(section.state == "ready" for section in verification_sections):
-        findings.append(Finding("warning", "verification expectations are missing or TODO-only."))
+        findings.append(Finding("warning", "verification record is missing or TODO-only."))
     if not any(section.state == "ready" for section in evidence_sections):
         findings.append(Finding("warning", "evidence expectations are missing or TODO-only."))
     if _has_open_questions(open_question_sections):
@@ -370,8 +423,10 @@ def _recommended_actions(findings: list[Finding]) -> list[str]:
         actions.append("Record coupling and maintainability concerns, or state that none apply.")
     if any("security / privacy" in message for message in messages):
         actions.append("Record security/privacy risk-surface notes, or state that no sensitive surface was identified.")
-    if any("test expectations" in message or "verification expectations" in message for message in messages):
-        actions.append("Record expected tests, checks, and verification commands.")
+    if any("test expectations" in message for message in messages):
+        actions.append("Record planned tests and verification intent in test-contract.md.")
+    if any("verification record" in message for message in messages):
+        actions.append("After implementation, record commands and checks actually run in verification.md.")
     if any("evidence expectations" in message for message in messages):
         actions.append("Record what evidence should be captured after implementation.")
     if any("open questions" in message or "preflight.md reported blocker" in message for message in messages):
@@ -484,7 +539,7 @@ def _render_report(
     lines.extend(_render_group("Coupling / Maintainability Notes", coupling_sections))
     lines.extend(_render_group("Security / Privacy Risk-Surface Notes", [security]))
     lines.extend(_render_group("Test Expectations", test_sections))
-    lines.extend(_render_group("Verification Expectations", verification_sections))
+    lines.extend(_render_group("Verification Record", verification_sections))
     lines.extend(_render_group("Evidence Expectations", evidence_sections))
     lines.extend(_render_group("Open Questions", [assumptions_open_questions, architecture_sections[-1]]))
     lines.extend(_render_preflight_signals(preflight, preflight_findings))
@@ -539,8 +594,8 @@ def run_spec(root: Path, task_slug: str, *, dry_run: bool = False, force: bool =
     spec_path = _spec_path(task_slug)
     req_path = _requirements_path(task_slug)
     try:
-        spec_target = resolve_under_root(root, spec_path)
-        req_target = resolve_under_root(root, req_path)
+        spec_target = resolve_managed_output_under_root(root, spec_path)
+        req_target = resolve_managed_output_under_root(root, req_path)
         entries = _load_manifest_entries(root)
     except Exception as exc:
         return 1, [f"Could not read harness manifest or resolve spec paths: {exc}"]
@@ -548,7 +603,23 @@ def run_spec(root: Path, task_slug: str, *, dry_run: bool = False, force: bool =
     spec_path_text = spec_path.as_posix()
     req_path_text = req_path.as_posix()
 
-    artifacts = _read_source_artifacts(root, task_slug)
+    try:
+        expected_spec = lineage_definition_for_task("spec", task_slug)
+        expected_requirements = lineage_definition_for_task(
+            "requirements_projection",
+            task_slug,
+        )
+        if expected_spec.dependencies != expected_requirements.dependencies:
+            raise ValueError("spec sibling dependency definitions do not match")
+        captures = capture_dependencies(root, expected_spec)
+        dependency_snapshot = provenance_dependencies(captures)
+        captured_by_path = {
+            item.record.dependency_path: item for item in captures
+        }
+    except Exception as exc:
+        return 1, [f"Could not snapshot spec provenance inputs: {exc}"]
+
+    artifacts = _read_source_artifacts(task_slug, captured_by_path)
     by_name = {artifact.filename: artifact for artifact in artifacts}
     implementation_boundary = _extract_section(by_name, "task.md", "Implementation Boundary", ("Scope",))
     assumptions_open_questions = _extract_section(by_name, "task.md", "Assumptions And Open Questions", ("Open Questions",))
@@ -584,7 +655,7 @@ def run_spec(root: Path, task_slug: str, *, dry_run: bool = False, force: bool =
         _extract_section(by_name, "test-contract.md", "Negative And Edge Cases"),
     ]
     verification_sections = [
-        _extract_section(by_name, "verification.md", "Commands And Tests To Run", ("Commands And Tests To Run Later", "Verification Commands")),
+        _extract_section(by_name, "verification.md", "Commands And Checks Run", ("Commands And Tests To Run", "Commands And Tests To Run Later", "Verification Commands")),
         _extract_section(by_name, "verification.md", "Results", ("Verification Results",)),
         _extract_section(by_name, "verification.md", "Not Run / Why", ("Not Run", "Not Run Why")),
         _extract_section(by_name, "verification.md", "Manual Review Notes", ("Manual Verification", "Review Notes")),
@@ -597,7 +668,7 @@ def run_spec(root: Path, task_slug: str, *, dry_run: bool = False, force: bool =
         _extract_section(by_name, "evidence.md", "Known Gaps And Risks", ("Known Gaps", "Risks")),
         _extract_section(by_name, "evidence.md", "References", ("Supporting Artifacts", "Links")),
     ]
-    preflight = _read_preflight(root, task_slug)
+    preflight = _read_preflight(task_slug, captured_by_path)
     copied_preflight_findings = _preflight_findings(preflight)
     requirements_document = build_requirements_document(task_slug, requirements.text if requirements.state in {"ready", "TODO-only"} else "")
     requirements_content = render_requirements_yaml(requirements_document)
@@ -623,9 +694,10 @@ def run_spec(root: Path, task_slug: str, *, dry_run: bool = False, force: bool =
         Finding("info", "spec does not run tests."),
         Finding("info", "spec does not enforce packs."),
     ]
+    generated_at = _timestamp()
     content = _render_report(
         slug=task_slug,
-        generated_at=_timestamp(),
+        generated_at=generated_at,
         artifacts=artifacts,
         preflight=preflight,
         implementation_boundary=implementation_boundary,
@@ -660,27 +732,89 @@ def run_spec(root: Path, task_slug: str, *, dry_run: bool = False, force: bool =
         messages.append("dry run; no files written")
         return 0, messages
 
-    unchanged = [
-        artifact.target.exists() and artifact.target.read_text(encoding="utf-8") == artifact.content
+    content_by_path = {
+        artifact.path.as_posix(): artifact.content.encode("utf-8")
         for artifact in generated_artifacts
-    ]
-    if all(unchanged):
+    }
+    existed_before = {
+        artifact.path.as_posix(): artifact.target.exists()
+        for artifact in generated_artifacts
+    }
+    try:
+        changed_paths = [
+            artifact.path.as_posix()
+            for artifact in generated_artifacts
+            if (
+                not existed_before[artifact.path.as_posix()]
+                or artifact.target.read_bytes()
+                != content_by_path[artifact.path.as_posix()]
+            )
+        ]
+        if changed_paths:
+            manifest_path = resolve_under_root(root, ".harness/manifest.json")
+            current_manifest = load_manifest_model(manifest_path)
+            invalidated = remove_provenance_records(
+                current_manifest,
+                changed_paths,
+                generated_at=generated_at,
+            )
+            if invalidated != current_manifest:
+                persist_manifest_model(root, invalidated)
+
+        persisted_results = {}
         for artifact in generated_artifacts:
-            messages.append(f"skip unchanged file {artifact.path.as_posix()}")
+            path_text = artifact.path.as_posix()
+            persisted_results[path_text] = persist_exact_bytes(
+                artifact.target,
+                content_by_path[path_text],
+            )
+
+        provenance_records = [
+            build_provenance_record(
+                expected_spec,
+                output_sha256=persisted_results[spec_path_text].sha256,
+                dependencies=dependency_snapshot,
+                repository_observations=(),
+            ),
+            build_provenance_record(
+                expected_requirements,
+                output_sha256=persisted_results[req_path_text].sha256,
+                dependencies=dependency_snapshot,
+                repository_observations=(),
+            ),
+        ]
+        managed_records = [
+            build_managed_file_record(root, spec_path_text),
+            build_managed_file_record(root, req_path_text),
+        ]
+        manifest_path = resolve_under_root(root, ".harness/manifest.json")
+        current_manifest = load_manifest_model(manifest_path)
+        updated_manifest = replace_managed_and_provenance_records(
+            current_manifest,
+            managed_records,
+            provenance_records,
+            generated_at=generated_at,
+            upgrade_to_v2=True,
+        )
+        manifest_changed = updated_manifest != current_manifest
+        if manifest_changed:
+            persist_manifest_model(root, updated_manifest)
+    except Exception as exc:
+        return 1, [f"Could not persist spec outputs and provenance: {exc}"]
+
+    for artifact in generated_artifacts:
+        path_text = artifact.path.as_posix()
+        if persisted_results[path_text].changed:
+            action = "refresh" if existed_before[path_text] else "create"
+            messages.append(f"{action} file {path_text}")
+        else:
+            messages.append(f"skip unchanged file {path_text}")
+
+    if manifest_changed:
+        messages.append("refreshed manifest .harness/manifest.json")
+        messages.append("root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified")
+        messages.append(".harness/generated/agent-instructions.md was not modified")
+        messages.append(f".harness/tasks/{task_slug}/generated/agent-workset.md was not modified")
+    else:
         messages.append("skip existing manifest .harness/manifest.json")
-        return 0, messages
-
-    for artifact, is_unchanged in zip(generated_artifacts, unchanged):
-        if is_unchanged:
-            messages.append(f"skip unchanged file {artifact.path.as_posix()}")
-            continue
-        action = "refresh" if artifact.target.exists() else "create"
-        write_text(artifact.target, artifact.content)
-        messages.append(f"{action} file {artifact.path.as_posix()}")
-
-    write_manifest(root, extra_managed_paths=[spec_path, req_path])
-    messages.append("refreshed manifest .harness/manifest.json")
-    messages.append("root AGENTS.md and CLAUDE.md were not modified")
-    messages.append(".harness/generated/agent-instructions.md was not modified")
-    messages.append(f".harness/tasks/{task_slug}/generated/agent-workset.md was not modified")
     return 0, messages

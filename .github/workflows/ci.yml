@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: tests / ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.10"
+          - os: ubuntu-24.04
+            python-version: "3.11"
+          - os: ubuntu-24.04
+            python-version: "3.12"
+          - os: ubuntu-24.04
+            python-version: "3.13"
+          - os: ubuntu-24.04
+            python-version: "3.14"
+          - os: windows-2022
+            python-version: "3.10"
+          - os: windows-2022
+            python-version: "3.14"
+          - os: macos-14
+            python-version: "3.10"
+          - os: macos-14
+            python-version: "3.14"
+    steps:
+      - name: Check out the public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up stable Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: false
+          check-latest: true
+      - name: Install the self-contained public test environment
+        run: python -m pip install ".[test]"
+      - name: Run tests with required real symlinks
+        if: runner.os != 'Windows'
+        env:
+          AI_SDLC_REQUIRE_REAL_SYMLINKS: "1"
+        run: python -m pytest
+      - name: Run tests on Windows
+        if: runner.os == 'Windows'
+        run: python -m pytest
+
+  distribution:
+    name: distribution validation
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the public repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up stable Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          allow-prereleases: false
+          check-latest: true
+      - name: Install distribution validation tools
+        run: python -m pip install ".[test]" build twine
+      - name: Build wheel and sdist from a fresh output directory
+        shell: bash
+        run: |
+          DIST_DIR="$RUNNER_TEMP/ai-sdlc-dist"
+          mkdir "$DIST_DIR"
+          python -m build --outdir "$DIST_DIR"
+          echo "DIST_DIR=$DIST_DIR" >> "$GITHUB_ENV"
+      - name: Validate distribution metadata and inventories
+        shell: bash
+        run: |
+          python -m twine check --strict "$DIST_DIR"/*.whl "$DIST_DIR"/*.tar.gz
+          python .github/audit_release_artifacts.py "$DIST_DIR"
+          python .github/audit_release_artifacts.py --verify "$DIST_DIR"
+      - name: Install and smoke-test the exact wheel and sdist
+        shell: bash
+        run: |
+          wheel_paths=( "$DIST_DIR"/*.whl )
+          sdist_paths=( "$DIST_DIR"/*.tar.gz )
+          test "${#wheel_paths[@]}" -eq 1
+          test "${#sdist_paths[@]}" -eq 1
+          test -f "${wheel_paths[0]}"
+          test -f "${sdist_paths[0]}"
+
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install "${wheel_paths[0]}"
+          mkdir "$RUNNER_TEMP/wheel-smoke"
+          (
+            cd "$RUNNER_TEMP/wheel-smoke"
+            "$RUNNER_TEMP/wheel-venv/bin/ai-sdlc" --version
+            "$RUNNER_TEMP/wheel-venv/bin/ai-sdlc" --help
+            "$RUNNER_TEMP/wheel-venv/bin/ai-sdlc" init
+          )
+
+          python -m venv "$RUNNER_TEMP/sdist-venv"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install "${sdist_paths[0]}"
+          mkdir "$RUNNER_TEMP/sdist-smoke"
+          (
+            cd "$RUNNER_TEMP/sdist-smoke"
+            "$RUNNER_TEMP/sdist-venv/bin/ai-sdlc" --version
+            "$RUNNER_TEMP/sdist-venv/bin/ai-sdlc" --help
+          )
+
+  required:
+    name: required
+    if: always()
+    needs: [test, distribution]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every upstream job to succeed
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          DISTRIBUTION_RESULT: ${{ needs.distribution.result }}
+        shell: bash
+        run: |
+          test "$TEST_RESULT" = "success"
+          test "$DISTRIBUTION_RESULT" = "success"

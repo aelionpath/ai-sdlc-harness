@@ -1,12 +1,38 @@
 from __future__ import annotations
 
 import json
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
+from types import MappingProxyType, SimpleNamespace
 
+import pytest
 import yaml
 
-from ai_sdlc_harness.generate import run_generate
+import ai_sdlc_harness.context as context_module
+import ai_sdlc_harness.generate as generate_module
+from ai_sdlc_harness.context import (
+    BudgetConfiguration,
+    BudgetStatus,
+    ContextFinding,
+    FindingLevel,
+    FreshnessState,
+    RepositoryObservations,
+    parse_context_manifest_yaml,
+    render_context_manifest_yaml,
+)
+from ai_sdlc_harness.files import sha256_bytes
+from ai_sdlc_harness.generate import (
+    GenerationPreparation,
+    _build_context_manifest,
+    _canonical_findings,
+    _load_budget_configuration,
+    _prepare_generation,
+    _render_workset,
+    _repository_observations,
+    run_generate,
+)
 from ai_sdlc_harness.init import init_project
+from ai_sdlc_harness.manifest import write_manifest
 from ai_sdlc_harness.preflight import run_preflight
 from ai_sdlc_harness.spec import run_spec
 from ai_sdlc_harness.status import status_project
@@ -38,25 +64,33 @@ def _workset_path(root: Path, slug: str) -> Path:
     return root / ".harness" / "tasks" / slug / "generated" / "agent-workset.md"
 
 
-def _spec_path(root: Path, slug: str) -> Path:
-    return root / ".harness" / "tasks" / slug / "spec.md"
-
-
-def _requirements_path(root: Path, slug: str) -> Path:
-    return root / ".harness" / "tasks" / slug / "requirements.yaml"
+def _context_manifest_path(root: Path, slug: str) -> Path:
+    return root / ".harness" / "tasks" / slug / "generated" / "context-manifest.yaml"
 
 
 def _task_path(root: Path, slug: str, filename: str) -> Path:
     return root / ".harness" / "tasks" / slug / filename
 
 
+def _manifest_path(root: Path) -> Path:
+    return root / ".harness" / "manifest.json"
+
+
 def _manifest(root: Path) -> dict:
-    return json.loads((root / ".harness" / "manifest.json").read_text(encoding="utf-8"))
+    return json.loads(_manifest_path(root).read_text(encoding="utf-8"))
 
 
 def _manifest_entry(root: Path, path: str) -> dict:
     entries = {entry["path"]: entry for entry in _manifest(root)["managed_files"]}
     return entries[path]
+
+
+def _write_manifest_data(root: Path, data: dict) -> None:
+    _manifest_path(root).write_text(
+        json.dumps(data, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _start_sample_task(root: Path, title: str = "Generate me") -> str:
@@ -119,7 +153,7 @@ The CLI command and options stay unchanged.
 
 ## Architecture Hygiene
 
-Use shallow Markdown heading extraction only.
+Use shallow deterministic selection only.
 
 ## Security And Privacy Risk Surface
 
@@ -140,7 +174,7 @@ Manifest-managed generated worksets are verified like other managed task outputs
 
 ## Maintainability Sensors
 
-Keep section extraction deterministic and local to generate.
+Keep selection deterministic and local to generate orchestration.
 """,
         encoding="utf-8",
     )
@@ -200,6 +234,13 @@ Record relevant references here.
 """,
         encoding="utf-8",
     )
+    write_manifest(root)
+
+
+def _prepared_project(root: Path) -> tuple[str, GenerationPreparation]:
+    slug = _start_sample_task(root)
+    _fill_task_inputs(root, slug)
+    return slug, _prepare_generation(root, slug)
 
 
 def test_generate_fails_before_init(project_tmp):
@@ -227,64 +268,307 @@ def test_generate_rejects_unsafe_task_slug(project_tmp):
     assert "Task slug is unsafe" in messages[0]
 
 
-def test_generate_uses_task_start_title_and_preserves_task_inputs(project_tmp):
-    assert init_project(project_tmp)[0] == 0
-    assert start_task(project_tmp, "Add validation for negative numbers")[0] == 0
-    slug = "add-validation-for-negative-numbers"
-    tracked = [_task_path(project_tmp, slug, filename) for filename in TASK_FILES]
-    before = {path: path.read_bytes() for path in tracked}
+def test_preparation_calls_lineage_detection_and_selector_once_with_exact_values(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    original_resolve = generate_module.resolve_derived_freshness
+    original_select = context_module.select_context
+    original_detect = generate_module.detect_project_signals
+    calls = {"lineage": 0, "select": 0, "detect": 0}
+    captured: dict[str, object] = {}
 
-    code, _ = run_generate(project_tmp, slug)
+    def wrapped_resolve(root, task_slug):
+        calls["lineage"] += 1
+        result = original_resolve(root, task_slug)
+        captured["freshness"] = result.derived_freshness
+        return result
 
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    assert code == 0
-    assert "- Task title: Add validation for negative numbers" in text
-    assert "- Task title: Default Workflow Context" not in text
-    assert {path: path.read_bytes() for path in tracked} == before
+    def wrapped_detect(root):
+        calls["detect"] += 1
+        return original_detect(root)
+
+    def wrapped_select(root, task_slug, **kwargs):
+        calls["select"] += 1
+        captured.update(kwargs)
+        return original_select(root, task_slug, **kwargs)
+
+    monkeypatch.setattr(generate_module, "resolve_derived_freshness", wrapped_resolve)
+    monkeypatch.setattr(generate_module, "detect_project_signals", wrapped_detect)
+    monkeypatch.setattr(generate_module, "select_context", wrapped_select)
+
+    preparation = _prepare_generation(project_tmp, slug)
+
+    assert calls == {"lineage": 1, "select": 1, "detect": 1}
+    assert captured["derived_freshness"] is captured["freshness"]
+    assert isinstance(captured["budget_configuration"], BudgetConfiguration)
+    assert captured["repository_observations"] == RepositoryObservations(
+        available=True,
+        git_repo=False,
+        existing_agent_files=(),
+    )
+    assert (
+        preparation.selection.repository_observations
+        == captured["repository_observations"]
+    )
 
 
-def test_generate_falls_back_to_slug_title_when_task_title_is_missing(project_tmp):
-    assert init_project(project_tmp)[0] == 0
-    assert start_task(project_tmp, "Add validation for negative numbers")[0] == 0
-    slug = "add-validation-for-negative-numbers"
-    task = _task_path(project_tmp, slug, "task.md")
-    task.write_text(
-        """# Task
+def test_preparation_merges_canonical_exact_findings_outside_selector(
+    project_tmp,
+    monkeypatch,
+):
+    slug, baseline = _prepared_project(project_tmp)
+    duplicate = ContextFinding("same", FindingLevel.WARNING, None, "same")
+    lineage_blocker = ContextFinding("lineage_blocker", FindingLevel.BLOCKER, None, "lineage")
+    selector_info = ContextFinding("selector_info", FindingLevel.INFO, None, "selector")
+    budget_warning = ContextFinding("budget_warning", FindingLevel.WARNING, None, "budget")
+    freshness = MappingProxyType(
+        {
+            "spec": FreshnessState.MISSING,
+            "requirements_projection": FreshnessState.MISSING,
+            "preflight": FreshnessState.MISSING,
+            "test_contract_review": FreshnessState.MISSING,
+        }
+    )
 
-## Default Workflow Context
+    monkeypatch.setattr(
+        generate_module,
+        "resolve_derived_freshness",
+        lambda *_: SimpleNamespace(
+            derived_freshness=freshness,
+            findings=(duplicate, lineage_blocker),
+        ),
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "_load_budget_configuration",
+        lambda *_: (baseline.selection.budget.configuration, (budget_warning, duplicate)),
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "select_context",
+        lambda *args, **kwargs: replace(
+            baseline.selection,
+            findings=(duplicate, selector_info),
+        ),
+    )
 
-This task file no longer carries an explicit title.
+    preparation = _prepare_generation(project_tmp, slug)
 
-## Implementation Boundary
+    assert preparation.findings == _canonical_findings(
+        [duplicate, lineage_blocker, budget_warning, duplicate, selector_info]
+    )
+    assert preparation.blockers == (lineage_blocker,)
+    assert preparation.selection.findings == (duplicate, selector_info)
 
-TODO: Describe the expected change area.
-""",
+
+def test_generation_preparation_is_frozen_tuple_backed_and_equal(project_tmp):
+    _, preparation = _prepared_project(project_tmp)
+
+    assert preparation == GenerationPreparation(
+        selection=preparation.selection,
+        findings=preparation.findings,
+    )
+    assert isinstance(preparation.findings, tuple)
+    with pytest.raises(FrozenInstanceError):
+        preparation.findings = ()  # type: ignore[misc]
+    with pytest.raises(TypeError, match="findings must be a tuple"):
+        GenerationPreparation(
+            preparation.selection,
+            list(preparation.findings),  # type: ignore[arg-type]
+        )
+
+
+def test_valid_custom_budget_thresholds_reach_selection_unchanged(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    custom = {
+        "per_file_warning_approximate_tokens": 101,
+        "per_file_high_risk_approximate_tokens": 202,
+        "total_warning_approximate_tokens": 303,
+        "total_high_risk_approximate_tokens": 404,
+    }
+    (project_tmp / ".harness" / "config.yaml").write_text(
+        yaml.safe_dump({"context_budget": custom}),
         encoding="utf-8",
     )
-    before = task.read_bytes()
+    captured = {}
+    original_select = context_module.select_context
 
-    code, _ = run_generate(project_tmp, slug)
+    def wrapped_select(root, task_slug, **kwargs):
+        captured["budget"] = kwargs["budget_configuration"]
+        return original_select(root, task_slug, **kwargs)
 
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    assert code == 0
-    assert "- Task title: Add validation for negative numbers" in text
-    assert "- Task title: Default Workflow Context" not in text
-    assert task.read_bytes() == before
+    monkeypatch.setattr(generate_module, "select_context", wrapped_select)
+
+    _prepare_generation(project_tmp, slug)
+
+    assert captured["budget"] == BudgetConfiguration(**custom)
 
 
-def test_generate_fails_for_missing_required_input(project_tmp):
+def test_absent_budget_section_uses_defaults_and_existing_info(project_tmp):
+    assert init_project(project_tmp)[0] == 0
+    config = project_tmp / ".harness" / "config.yaml"
+    loaded = yaml.safe_load(config.read_text(encoding="utf-8"))
+    loaded.pop("context_budget")
+    config.write_text(yaml.safe_dump(loaded), encoding="utf-8")
+
+    budget, findings = _load_budget_configuration(project_tmp)
+
+    assert budget == BudgetConfiguration(4000, 8000, 12000, 24000)
+    assert [finding.code for finding in findings] == [
+        "context_budget_defaults_applied"
+    ]
+
+
+def test_malformed_budget_section_uses_complete_defaults_and_warning(project_tmp):
+    assert init_project(project_tmp)[0] == 0
+    (project_tmp / ".harness" / "config.yaml").write_text(
+        "context_budget:\n  total_warning_approximate_tokens: 1\n",
+        encoding="utf-8",
+    )
+
+    budget, findings = _load_budget_configuration(project_tmp)
+
+    assert budget == BudgetConfiguration(4000, 8000, 12000, 24000)
+    assert [finding.code for finding in findings] == [
+        "malformed_context_budget_configuration"
+    ]
+
+
+@pytest.mark.parametrize(
+    "configuration_content",
+    [
+        "not: [valid\n",
+        "- top-level\n- list\n",
+        "plain scalar\n",
+    ],
+)
+def test_invalid_configuration_shapes_use_stable_blocker(
+    project_tmp,
+    configuration_content,
+):
+    assert init_project(project_tmp)[0] == 0
+    config = project_tmp / ".harness" / "config.yaml"
+    config.write_text(configuration_content, encoding="utf-8")
+
+    budget, findings = _load_budget_configuration(project_tmp)
+
+    assert budget == BudgetConfiguration(4000, 8000, 12000, 24000)
+    assert findings == (generate_module._CONFIGURATION_UNAVAILABLE,)
+    blocker = findings[0]
+    assert blocker.level == FindingLevel.BLOCKER
+    assert blocker.path == ".harness/config.yaml"
+    assert blocker.message == (
+        "Harness configuration could not be read for context selection: "
+        ".harness/config.yaml."
+    )
+    assert str(project_tmp) not in blocker.message
+
+
+def test_missing_nonregular_and_unreadable_configuration_use_same_blocker(
+    project_tmp,
+    monkeypatch,
+):
+    assert init_project(project_tmp)[0] == 0
+    config = project_tmp / ".harness" / "config.yaml"
+    config.unlink()
+    _, missing = _load_budget_configuration(project_tmp)
+
+    config.mkdir()
+    _, nonregular = _load_budget_configuration(project_tmp)
+
+    config.rmdir()
+    config.write_text("schema_version: 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        generate_module,
+        "read_text",
+        lambda *_: (_ for _ in ()).throw(OSError("private path")),
+    )
+    _, unreadable = _load_budget_configuration(project_tmp)
+
+    expected = generate_module._CONFIGURATION_UNAVAILABLE
+    expected_result = (
+        BudgetConfiguration(4000, 8000, 12000, 24000),
+        (expected,),
+    )
+    assert _load_budget_configuration(project_tmp) == expected_result
+    assert missing == (expected,)
+    assert nonregular == (expected,)
+    assert unreadable == (expected,)
+    assert config.read_text(encoding="utf-8") == "schema_version: 1\n"
+
+
+def test_unsafe_configuration_path_uses_only_stable_blocker(
+    project_tmp,
+    monkeypatch,
+):
+    assert init_project(project_tmp)[0] == 0
+    original_resolve = generate_module.resolve_under_root
+
+    def unsafe_configuration(root, relative_path):
+        if str(relative_path) == generate_module._CONFIGURATION_PATH:
+            raise generate_module.PathSafetyError("private unsafe path")
+        return original_resolve(root, relative_path)
+
+    monkeypatch.setattr(generate_module, "resolve_under_root", unsafe_configuration)
+
+    assert _load_budget_configuration(project_tmp) == (
+        BudgetConfiguration(4000, 8000, 12000, 24000),
+        (generate_module._CONFIGURATION_UNAVAILABLE,),
+    )
+
+
+def test_repository_observation_conversion_is_exact_sorted_and_safe():
+    observations = _repository_observations(
+        {
+            "git_repo": 1,
+            "detected_languages": ["python", "go", "python"],
+            "detected_package_managers": {"pip", "cargo", "pip"},
+            "detected_test_frameworks": ("pytest", "pytest"),
+            "detected_ci": ["github-actions", 7],
+            "existing_agent_files": None,
+            "ignored_deeper_signal": ["must-not-appear"],
+        }
+    )
+
+    assert observations == RepositoryObservations(
+        available=True,
+        git_repo=True,
+        detected_languages=("go", "python"),
+        detected_package_managers=("cargo", "pip"),
+        detected_test_frameworks=("pytest",),
+        detected_ci=("7", "github-actions"),
+        existing_agent_files=(),
+    )
+    assert _repository_observations({}) == RepositoryObservations(available=True)
+
+
+def test_missing_required_source_blocks_before_all_writes(project_tmp):
     slug = _start_sample_task(project_tmp)
     _task_path(project_tmp, slug, "acceptance.md").unlink()
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+    generated_dir = _workset_path(project_tmp, slug).parent
 
     code, messages = run_generate(project_tmp, slug)
 
     assert code == 1
-    assert "Cannot generate agent workset." in messages
-    assert any("missing required task input .harness/tasks/generate-me/acceptance.md" in message for message in messages)
-    assert not _workset_path(project_tmp, slug).exists()
+    assert messages[0] == "Cannot generate agent workset."
+    assert any(
+        message.startswith("- missing_required_source:")
+        and ".harness/tasks/generate-me/acceptance.md" in message
+        for message in messages
+    )
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
+    assert not generated_dir.exists()
 
 
-def test_generate_fails_for_unreadable_required_input(project_tmp):
+def test_unreadable_required_source_blocks_before_all_writes(project_tmp):
     slug = _start_sample_task(project_tmp)
     evidence = _task_path(project_tmp, slug, "evidence.md")
     evidence.unlink()
@@ -293,346 +577,378 @@ def test_generate_fails_for_unreadable_required_input(project_tmp):
     code, messages = run_generate(project_tmp, slug)
 
     assert code == 1
-    assert any("unreadable required task input .harness/tasks/generate-me/evidence.md" in message for message in messages)
+    assert any(
+        message.startswith("- unreadable_required_source:")
+        and ".harness/tasks/generate-me/evidence.md" in message
+        for message in messages
+    )
     assert not _workset_path(project_tmp, slug).exists()
 
 
-def test_generate_creates_workset_with_context_warnings_packs_and_signals(project_tmp):
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"force": True},
+        {"dry_run": True},
+        {"force": True, "dry_run": True},
+    ],
+)
+def test_lineage_blocker_is_not_bypassed_and_preserves_bytes(
+    project_tmp,
+    monkeypatch,
+    options,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
-    (project_tmp / "pyproject.toml").write_text("[project]\nname = \"sample\"\n", encoding="utf-8")
-    (project_tmp / "tests").mkdir()
-    _task_path(project_tmp, slug, "evidence-report.md").write_text(
-        "- blocker: post-implementation evidence report must not be consumed.\n",
+    fixed = "2026-07-30T00:00:00+00:00"
+    monkeypatch.setattr(generate_module, "_timestamp", lambda: fixed)
+    assert run_generate(project_tmp, slug)[0] == 0
+    workset_before = _workset_path(project_tmp, slug).read_bytes()
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+    preparation = _prepare_generation(project_tmp, slug)
+    blocker = ContextFinding(
+        "lineage_test_blocker",
+        FindingLevel.BLOCKER,
+        ".harness/manifest.json",
+        "Lineage test blocker.",
+    )
+    blocked = GenerationPreparation(
+        preparation.selection,
+        _canonical_findings([*preparation.findings, blocker]),
+    )
+    monkeypatch.setattr(generate_module, "_prepare_generation", lambda *_: blocked)
+
+    code, messages = run_generate(project_tmp, slug, **options)
+
+    assert code == 1
+    assert messages[0] == "Cannot generate agent workset."
+    assert "- lineage_test_blocker: Lineage test blocker. [.harness/manifest.json]" in messages
+    assert _workset_path(project_tmp, slug).read_bytes() == workset_before
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
+
+
+def test_configuration_blocker_prevents_output_and_manifest_writes(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    (project_tmp / ".harness" / "config.yaml").write_text(
+        "not: [valid\n",
         encoding="utf-8",
     )
-    _task_path(project_tmp, slug, "validation-report.md").write_text(
-        "- blocker: post-implementation validation report must not be consumed.\n",
-        encoding="utf-8",
-    )
+    manifest_before = _manifest_path(project_tmp).read_bytes()
 
     code, messages = run_generate(project_tmp, slug)
 
-    path = _workset_path(project_tmp, slug)
-    text = path.read_text(encoding="utf-8")
-    assert code == 0
-    assert f"agent workset: .harness/tasks/{slug}/generated/agent-workset.md" in messages
-    assert path.is_file()
-    assert "Task slug: `generate-me`" in text
-    assert (
-        "This workset compiles task-scoped context for implementation. It does not call AI models, "
-        "generate code, generate tests, run tests, inspect target code deeply, scan security, validate compliance, "
-        "prove correctness, security, or release readiness, enforce packs, or install adapters."
-    ) in text
-    assert "semantic enforcement" not in text.lower()
-    for heading in (
-        "## Summary",
-        "## Implementation Contract",
-        "## Specification",
-        "## Structured Requirements",
-        "## Task Boundary",
-        "## Requirements / Acceptance Criteria",
-        "## Architecture / Coupling Notes",
-        "## Security / Privacy Risk-Surface Notes",
-        "## Preflight Signals",
-        "## Test-Contract Signals",
-        "## Verification Expectations",
-        "## Evidence Expectations",
-        "## Optional Packs",
-        "## Repository Signals",
-        "## Implementation Instructions",
-        "## Human Review Notes",
-        "## Disclaimer",
-    ):
-        assert heading in text
-    assert "- Task title: Generate me" in text
-    assert "Source: `task.md`" in text
-    assert "### Implementation Boundary" in text
-    assert "warning: workset context report `spec.md` has not been generated." in text
-    assert "warning: structured requirements `requirements.yaml` has not been generated." in text
-    assert "Keep changes inside `generate.py` and focused tests." in text
-    assert "### Assumptions And Open Questions" in text
-    assert "### Requirements And Acceptance Criteria" in text
-    assert "### Protected Behavior And Non-Goals" in text
-    assert "Do not consume post-implementation reports." in text
-    assert "### Interface And Compatibility Impact" in text
-    assert "### Security And Privacy Risk Surface" in text
-    assert "### Maintainability Sensors" in text
-    assert "### Commands And Tests To Run" in text
-    assert "### Final Evidence" in text
-    assert "### Tests And Checks Run" in text
-    assert "### Known Gaps And Risks" in text
-    assert "warning: workset context report `preflight.md` has not been generated." in text
-    assert "warning: workset context report `test-contract-review.md` has not been generated." in text
-    assert "No optional packs selected. The foundation workflow still applies." in text
-    assert "architecture-generic" not in text
-    assert "coupling-baseline" not in text
-    assert "observability-baseline" not in text
-    assert "security-baseline" not in text
-    assert "Post-implementation reports are not implementation inputs: `evidence-report.md` and `validation-report.md` are not consumed." in text
-    assert "post-implementation evidence report must not be consumed" not in text
-    assert "post-implementation validation report must not be consumed" not in text
-    assert "Detected languages: python" in text
-    assert "Detected test frameworks: tests-directory-or-pytest" in text
-    assert "- Implement only the task described by the task artifacts." in text
-    assert "- Stay within the task boundary." in text
-    assert "- Preserve protected areas, non-goals, and existing interfaces unless explicitly changed in the task artifacts." in text
-    assert "- Do not silently expand scope." in text
-    assert "- Implement only after blocker findings are resolved or explicitly accepted by the human." in text
-    assert "- Record deviations, commands run, results, not-run rationale, gaps, and references in `evidence.md` and `verification.md`." in text
-    assert "- [ ] Protected areas, interface impact, and unresolved questions reviewed." in text
-    assert "- [ ] Security/privacy risk-surface notes reviewed where applicable." in text
-    assert "- [ ] Verification commands and results recorded in `verification.md` or `evidence.md`." in text
-    assert "- [ ] Any blocker findings were resolved or explicitly accepted by the human." in text
+    assert code == 1
+    assert any(
+        message == (
+            "- generation_configuration_unavailable: Harness configuration "
+            "could not be read for context selection: .harness/config.yaml."
+        )
+        for message in messages
+    )
+    assert not _workset_path(project_tmp, slug).exists()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
+    assert str(project_tmp) not in "\n".join(messages)
 
 
-def test_generate_includes_spec_when_present(project_tmp):
+def test_unsafe_selector_finding_and_multiple_blockers_use_canonical_order(
+    project_tmp,
+    monkeypatch,
+):
+    slug, preparation = _prepared_project(project_tmp)
+    later = ContextFinding(
+        "z_blocker",
+        FindingLevel.BLOCKER,
+        None,
+        "Later blocker.",
+    )
+    unsafe = ContextFinding(
+        "unsafe_resolved_path",
+        FindingLevel.BLOCKER,
+        ".harness/tasks/generate-me/task.md",
+        "Registered context path resolves outside the repository root.",
+    )
+    blocked = GenerationPreparation(
+        preparation.selection,
+        _canonical_findings([later, unsafe]),
+    )
+    monkeypatch.setattr(generate_module, "_prepare_generation", lambda *_: blocked)
+
+    code, messages = run_generate(project_tmp, slug)
+
+    assert code == 1
+    assert messages == [
+        "Cannot generate agent workset.",
+        (
+            "- unsafe_resolved_path: Registered context path resolves outside "
+            "the repository root. [.harness/tasks/generate-me/task.md]"
+        ),
+        "- z_blocker: Later blocker.",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_code"),
+    [
+        (FreshnessState.MISSING, "missing_optional_artifact"),
+        (FreshnessState.UNKNOWN, "unknown_derived_artifact_excluded"),
+        (FreshnessState.STALE, "stale_derived_artifact_excluded"),
+    ],
+)
+def test_nonfresh_optional_derived_artifact_is_excluded_but_generation_succeeds(
+    project_tmp,
+    monkeypatch,
+    state,
+    expected_code,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
-    assert run_spec(project_tmp, slug)[0] == 0
+    spec = _task_path(project_tmp, slug, "spec.md")
+    spec.write_text("# Specification\n\nUNIQUE DERIVED BODY\n", encoding="utf-8")
+    original = generate_module.resolve_derived_freshness(project_tmp, slug)
+    freshness = dict(original.derived_freshness)
+    freshness["spec"] = state
+    immutable_freshness = MappingProxyType(freshness)
+    monkeypatch.setattr(
+        generate_module,
+        "resolve_derived_freshness",
+        lambda *_: SimpleNamespace(
+            derived_freshness=immutable_freshness,
+            findings=(),
+        ),
+    )
+    real_read_bytes = Path.read_bytes
+    spec_read_attempted = False
 
-    code, _ = run_generate(project_tmp, slug)
+    def guarded_read_bytes(path):
+        nonlocal spec_read_attempted
+        if path.resolve() == spec.resolve():
+            spec_read_attempted = True
+            raise AssertionError("non-fresh spec.md must not be read")
+        return real_read_bytes(path)
 
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    requirements = yaml.safe_load(_requirements_path(project_tmp, slug).read_text(encoding="utf-8"))
-    assert code == 0
-    assert "## Specification" in text
-    assert "Source: `spec.md`" in text
-    assert "- Status: present and readable." in text
-    assert "Spec question: Is the implementation intent clear enough to generate a useful workset and guide a coding agent?" in text
-    assert "warning: workset context report `spec.md` has not been generated." not in text
-    assert "## Structured Requirements" in text
-    assert "Source: `requirements.yaml`" in text
-    assert "Status: present, readable, and schema valid." in text
-    assert "- Artifact role: advisory projection." in text
-    assert "- Authority: non-authoritative." in text
-    assert "- Edit model: edit source task artifacts and rerun `ai-sdlc spec --task <slug>`." in text
-    assert "not the authoritative source of truth." in text
-    assert "`REQ-001` [draft]: agent-workset.md is created under the task generated folder." in text
-    assert "acceptance_criteria: []" in text
-    assert "verification: []" in text
-    assert _spec_path(project_tmp, slug).is_file()
-    assert requirements["schema_version"] == 1
-    assert requirements["artifact_role"] == "advisory_projection"
-    assert requirements["authority"] == "non_authoritative"
-    assert requirements["edit_model"] == "edit_source_task_artifacts_and_rerun_spec"
-
-    entry = _manifest_entry(project_tmp, f".harness/tasks/{slug}/generated/agent-workset.md")
-    assert entry["protected"] is True
-    assert entry["hash_algorithm"] == "sha256"
-    assert entry["sha256"]
-
-
-def test_generate_warns_for_malformed_or_invalid_requirements_without_failing(project_tmp):
-    slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    _requirements_path(project_tmp, slug).write_text("not: [valid\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
 
     code, _ = run_generate(project_tmp, slug)
 
     text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert "warning: structured requirements `requirements.yaml` is invalid:" in text
-    assert "malformed YAML" in text
+    assert not spec_read_attempted
+    assert "UNIQUE DERIVED BODY" not in text
+    assert f"`{expected_code}`" in text
+    assert f"rerun `ai-sdlc spec --task {slug}`" in text
 
-    _workset_path(project_tmp, slug).unlink()
-    _requirements_path(project_tmp, slug).write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "artifact_role": "advisory_projection",
-                "authority": "non_authoritative",
-                "edit_model": "edit_source_task_artifacts_and_rerun_spec",
-                "task_slug": slug,
-                "source_model": "deterministic_acceptance_markdown_projection",
-                "source_artifacts": [{"path": "acceptance.md", "section": "Requirements And Acceptance Criteria"}],
-                "requirements": [{"id": "REQ-001", "statement": "Do thing.", "status": "accepted"}],
-                "findings": [],
-            },
-            sort_keys=False,
-        ),
+
+def test_advisory_budget_warning_and_malformed_budget_continue(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    (project_tmp / ".harness" / "config.yaml").write_text(
+        "context_budget:\n  incomplete: true\n",
         encoding="utf-8",
     )
 
-    code, _ = run_generate(project_tmp, slug, force=True)
+    code, _ = run_generate(project_tmp, slug)
 
     text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert "warning: structured requirements `requirements.yaml` is invalid:" in text
-    assert "invalid requirement status" in text
+    assert "`malformed_context_budget_configuration`" in text
+    assert "Budget findings are advisory" in text
 
-    _workset_path(project_tmp, slug).unlink()
-    _requirements_path(project_tmp, slug).write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "authority": "non_authoritative",
-                "edit_model": "edit_source_task_artifacts_and_rerun_spec",
-                "task_slug": slug,
-                "source_model": "deterministic_acceptance_markdown_projection",
-                "source_artifacts": [{"path": "acceptance.md", "section": "Requirements And Acceptance Criteria"}],
-                "requirements": [],
-                "findings": [],
-            },
-            sort_keys=False,
-        ),
+
+@pytest.mark.parametrize(
+    ("per_file_high_risk", "expected_status", "expected_finding"),
+    [
+        (100_000, BudgetStatus.WARNING, "context_file_budget_warning"),
+        (2, BudgetStatus.HIGH_RISK, "context_file_budget_high_risk"),
+    ],
+)
+def test_real_advisory_budget_outcomes_are_rendered_and_do_not_block(
+    project_tmp,
+    per_file_high_risk,
+    expected_status,
+    expected_finding,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    configuration = {
+        "context_budget": {
+            "per_file_warning_approximate_tokens": 1,
+            "per_file_high_risk_approximate_tokens": per_file_high_risk,
+            "total_warning_approximate_tokens": 100_000,
+            "total_high_risk_approximate_tokens": 200_000,
+        }
+    }
+    (project_tmp / ".harness" / "config.yaml").write_text(
+        yaml.safe_dump(configuration),
         encoding="utf-8",
     )
 
-    code, _ = run_generate(project_tmp, slug, force=True)
+    code, _ = run_generate(project_tmp, slug)
 
     text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert "warning: structured requirements `requirements.yaml` is invalid:" in text
-    assert "artifact_role must be advisory_projection." in text
-
-    _workset_path(project_tmp, slug).unlink()
-    _requirements_path(project_tmp, slug).write_text(
-        yaml.safe_dump(
-            {
-                "schema_version": 1,
-                "artifact_role": "advisory_projection",
-                "authority": "authoritative",
-                "edit_model": "edit_source_task_artifacts_and_rerun_spec",
-                "task_slug": slug,
-                "source_model": "deterministic_acceptance_markdown_projection",
-                "source_artifacts": [{"path": "acceptance.md", "section": "Requirements And Acceptance Criteria"}],
-                "requirements": [],
-                "findings": [],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-    code, _ = run_generate(project_tmp, slug, force=True)
-
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    assert code == 0
-    assert "warning: structured requirements `requirements.yaml` is invalid:" in text
-    assert "authority must be non_authoritative." in text
+    assert f"- Status: `{expected_status.value}`" in text
+    assert f"`{expected_finding}`" in text
 
 
-def test_generate_includes_preflight_and_test_contract_review_summaries(project_tmp):
+def test_fresh_derived_outputs_are_selected_in_authority_order(project_tmp):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     assert run_preflight(project_tmp, slug)[0] == 0
+    assert run_spec(project_tmp, slug)[0] == 0
     assert run_test_contract_review(project_tmp, slug)[0] == 0
 
     code, _ = run_generate(project_tmp, slug)
 
     text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert "## Preflight Signals" in text
-    assert "Source: `preflight.md`" in text
-    assert "## Test-Contract Signals" in text
-    assert "Source: `test-contract-review.md`" in text
-    assert "- Status: present and readable." in text
-    assert "- warning:" in text
-    assert "- info:" in text
-    assert "workset context report `preflight.md` has not been generated." not in text
+    ids = [
+        "`task`",
+        "`acceptance`",
+        "`architecture_notes`",
+        "`coupling_notes`",
+        "`test_contract`",
+        "`verification`",
+        "`evidence`",
+        "`spec`",
+        "`requirements_projection`",
+        "`preflight`",
+        "`test_contract_review`",
+        "`selected_packs`",
+        "`repository_signals`",
+    ]
+    positions = [text.index(f"### {entry_id}") for entry_id in ids]
+    assert positions == sorted(positions)
+    assert "Spec question:" in text
+    assert "Artifact role: advisory projection." in text
+    assert "# Preflight Report" in text
+    assert "# Test-Contract Readiness Review" in text
+    assert "Selected report findings:" in text
 
 
-def test_generate_surfaces_prior_report_findings_with_lowercase_prefixes(project_tmp):
-    slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    _task_path(project_tmp, slug, "preflight.md").write_text(
-        """# Preflight
+def test_workset_render_uses_selection_only_and_is_deterministic(project_tmp):
+    slug, preparation = _prepared_project(project_tmp)
+    generated_at = "2026-07-30T00:00:00+00:00"
 
-- blocker: boundary must be accepted.
-- warning: open question remains.
-- info: preflight uses shallow checks only.
-""",
-        encoding="utf-8",
+    first = _render_workset(
+        slug=slug,
+        generated_at=generated_at,
+        selection=preparation.selection,
+        findings=preparation.findings,
     )
-    _task_path(project_tmp, slug, "test-contract-review.md").write_text(
-        """# Test Contract Review
-
-- blocker: desired behavior tests are missing.
-- warning: no CI detected.
-- info: no tests were run by this command.
-""",
-        encoding="utf-8",
-    )
-
-    code, _ = run_generate(project_tmp, slug)
-
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    assert code == 0
-    assert "- blocker: boundary must be accepted." in text
-    assert "- warning: open question remains." in text
-    assert "- info: preflight uses shallow checks only." in text
-    assert "- blocker: desired behavior tests are missing." in text
-    assert "- warning: no CI detected." in text
-    assert "- info: no tests were run by this command." in text
-
-
-def test_generate_lists_legacy_selected_pack_records_without_enforcement_claims(project_tmp):
-    slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    (project_tmp / ".harness" / "packs" / "selected.yaml").write_text(
-        """selected_packs:
-  - id: security-baseline
-    version: legacy
-    enabled: true
-  - id: architecture-generic
-    version: legacy
-    enabled: false
-""",
-        encoding="utf-8",
+    for filename in TASK_FILES:
+        _task_path(project_tmp, slug, filename).write_text(
+            "MUTATED AFTER SELECTION\n",
+            encoding="utf-8",
+        )
+    second = _render_workset(
+        slug=slug,
+        generated_at=generated_at,
+        selection=preparation.selection,
+        findings=preparation.findings,
     )
 
-    code, _ = run_generate(project_tmp, slug)
+    assert first == second
+    assert first.endswith("\n")
+    assert not first.endswith("\n\n")
+    assert "MUTATED AFTER SELECTION" not in first
+    for entry in preparation.selection.selected_entries:
+        assert f"### `{entry.entry_id}`" in first
+        if entry.path is not None:
+            assert f"- Path: `{entry.path}`" in first
+        assert f"- Classification: `{entry.classification.value}`" in first
+        assert f"- Authority: `{entry.authority_level.value}`" in first
+        assert f"- Inclusion: `{entry.inclusion_mode.value}`" in first
+        assert f"- Freshness: `{entry.freshness_state.value}`" in first
+        assert entry.selected_content.splitlines()[0] in first
 
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    assert code == 0
-    assert "Selected pack records are listed for context only. The workset does not imply pack enforcement." in text
-    assert "- selected record: security-baseline (version: legacy, enabled: yes)" in text
-    assert "- selected record: architecture-generic (version: legacy, enabled: no)" in text
-    assert "No optional packs selected. The foundation workflow still applies." not in text
-    assert "security-baseline is active" not in text
-    assert "architecture-generic is active" not in text
-    assert "enforced" not in text.lower()
 
-
-def test_generate_warns_for_missing_and_todo_only_extracted_sections(project_tmp):
-    slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    _task_path(project_tmp, slug, "architecture-notes.md").write_text(
-        """# Architecture Notes
-
-## Boundary
-
-TODO: identify the affected boundary.
-
-## Security And Privacy Risk Surface
-
-Not applicable.
-""",
-        encoding="utf-8",
+def test_workset_includes_conditional_baseline_secure_engineering_guardrails(
+    project_tmp,
+):
+    slug, preparation = _prepared_project(project_tmp)
+    text = _render_workset(
+        slug=slug,
+        generated_at="2026-07-30T00:00:00+00:00",
+        selection=preparation.selection,
+        findings=preparation.findings,
     )
+    lowered = text.lower()
 
-    code, _ = run_generate(project_tmp, slug)
+    assert "## Baseline Secure-Engineering Guardrails" in text
+    assert "Apply when relevant to the task" in text
+    assert "hard-coded secrets" in text
+    assert "sensitive values in logs, errors, evidence, or generated artifacts" in text
+    assert "untrusted input at trust boundaries" in text
+    assert "reject malformed or unsupported input safely" in text
+    assert "authorization checks and least privilege" in text
+    assert "do not broaden access, capability, or authority implicitly" in text
+    assert "Fail safely without exposing credentials" in text
+    assert "negative or abuse-path verification" in text
+    assert "when automation is impractical" in text
+    assert "dependency or security-relevant configuration changes" in text
+    assert "explicit review and evidence items" in text
+    assert "A clean Harness workflow is not proof of correctness, security, or compliance" in text
+    assert "scan for security issues or vulnerabilities" in text
+    assert "query external security or reputation services" in text
+    assert "security " + "score" not in lowered
+    assert "security " + "passed" not in lowered
+    assert "security " + "validated" not in lowered
 
-    text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
-    assert code == 0
-    assert "warning: workset context section `Boundary` in `architecture-notes.md` is TODO-only." in text
-    assert "warning: workset context section `Responsibility Change` is missing from `architecture-notes.md`." in text
-    assert "warning: workset context section `Existing Patterns To Preserve` is missing from `architecture-notes.md`." in text
-    assert "Not applicable." in text
+
+def test_workset_budget_and_merged_findings_are_exact(project_tmp):
+    slug, preparation = _prepared_project(project_tmp)
+    text = _render_workset(
+        slug=slug,
+        generated_at="2026-07-30T00:00:00+00:00",
+        selection=preparation.selection,
+        findings=preparation.findings,
+    )
+    budget = preparation.selection.budget
+
+    assert f"- Status: `{budget.result.status.value}`" in text
+    assert f"- Selected entry count: {budget.result.selected_entry_count}" in text
+    assert f"- Selected bytes: {budget.result.selected_bytes}" in text
+    assert (
+        f"- Selected approximate tokens: "
+        f"{budget.result.selected_approximate_tokens}"
+    ) in text
+    finding_lines = [
+        line
+        for line in text.splitlines()
+        if line.startswith(("- blocker: `", "- warning: `", "- info: `"))
+    ]
+    assert len(finding_lines) == len(preparation.findings)
+    assert [
+        line.split("`", 2)[1]
+        for line in finding_lines
+    ] == [finding.code for finding in preparation.findings]
 
 
-def test_generate_redacts_secrets_omits_environment_lines_and_truncates(project_tmp):
+def test_selection_redacts_secrets_omits_environment_lines_and_excludes_outputs(
+    project_tmp,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     long_text = "\n".join(f"line {index}" for index in range(80))
     fake_secret = "sk-" + "abcdefghijklmnop"
     fake_env_line = "API_" + "TOKEN" + "=" + "token-" + "abcdefghijklmnop"
     _task_path(project_tmp, slug, "task.md").write_text(
-        f"# Task\n\n## Implementation Boundary\n\n{fake_env_line}\nPath note: C:\\Temp\\owned\n{fake_secret}\n{long_text}\n",
+        (
+            "# Task\n\n## Implementation Boundary\n\n"
+            f"{fake_env_line}\n{fake_secret}\n{long_text}\n"
+        ),
         encoding="utf-8",
     )
-
+    _task_path(project_tmp, slug, "evidence-report.md").write_text(
+        "EXCLUDED EVIDENCE REPORT CONTENT\n",
+        encoding="utf-8",
+    )
+    _task_path(project_tmp, slug, "validation-report.md").write_text(
+        "EXCLUDED VALIDATION REPORT CONTENT\n",
+        encoding="utf-8",
+    )
     code, _ = run_generate(project_tmp, slug)
 
     text = _workset_path(project_tmp, slug).read_text(encoding="utf-8")
@@ -640,92 +956,202 @@ def test_generate_redacts_secrets_omits_environment_lines_and_truncates(project_
     assert fake_env_line not in text
     assert fake_secret not in text
     assert "[REDACTED]" in text
-    assert "API_TOKEN=" not in text
-    assert "environment-style line(s) omitted" in text
-    assert "Path note: C:\\Temp\\owned" in text
-    assert "Excerpt truncated; see the source artifact for full content." in text
+    assert "line 79" not in text
+    assert "EXCLUDED EVIDENCE REPORT CONTENT" not in text
+    assert "EXCLUDED VALIDATION REPORT CONTENT" not in text
+    assert "context-manifest.yaml" not in text
 
 
-def test_generate_does_not_overwrite_user_editable_inputs_or_static_agent_instructions(project_tmp):
+def test_legacy_generate_readers_are_removed_and_detection_has_one_caller():
+    for name in (
+        "_read_required_inputs",
+        "_read_optional_report",
+        "_load_selected_packs",
+    ):
+        assert not hasattr(generate_module, name)
+
+
+def test_generate_does_not_overwrite_task_inputs_or_global_agent_files(project_tmp):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
-    task_inputs_before = {filename: _task_path(project_tmp, slug, filename).read_bytes() for filename in TASK_FILES}
-    static_agent_instructions = project_tmp / ".harness" / "generated" / "agent-instructions.md"
-    static_before = static_agent_instructions.read_bytes()
+    root_agents = project_tmp / "AGENTS.md"
+    root_claude = project_tmp / "CLAUDE.md"
+    root_agents.write_text("root agents\n", encoding="utf-8")
+    root_claude.write_text("root claude\n", encoding="utf-8")
+    global_instructions = (
+        project_tmp / ".harness" / "generated" / "agent-instructions.md"
+    )
+    before = {
+        path: path.read_bytes()
+        for path in [
+            *(_task_path(project_tmp, slug, filename) for filename in TASK_FILES),
+            root_agents,
+            root_claude,
+            global_instructions,
+        ]
+    }
 
-    code, messages = run_generate(project_tmp, slug, force=True)
+    code, messages = run_generate(project_tmp, slug)
 
-    task_inputs_after = {filename: _task_path(project_tmp, slug, filename).read_bytes() for filename in TASK_FILES}
     assert code == 0
-    assert task_inputs_before == task_inputs_after
-    assert static_agent_instructions.read_bytes() == static_before
-    assert "root AGENTS.md and CLAUDE.md were not modified" in messages
+    assert {path: path.read_bytes() for path in before} == before
+    assert "root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified" in messages
     assert ".harness/generated/agent-instructions.md was not modified" in messages
+    assert _context_manifest_path(project_tmp, slug).is_file()
 
 
 def test_generate_dry_run_writes_nothing_and_preserves_manifest(project_tmp):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
-    manifest_before = (project_tmp / ".harness" / "manifest.json").read_bytes()
+    manifest_before = _manifest_path(project_tmp).read_bytes()
 
     code, messages = run_generate(project_tmp, slug, dry_run=True)
 
     assert code == 0
     assert "dry run; no files written" in messages
     assert not _workset_path(project_tmp, slug).exists()
-    assert (project_tmp / ".harness" / "manifest.json").read_bytes() == manifest_before
+    assert not _context_manifest_path(project_tmp, slug).exists()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
 
 
-def test_generate_rerun_refreshes_manifest_managed_hash_clean_workset(project_tmp, monkeypatch):
+def test_generate_skips_exact_noop_and_preserves_workset_and_manifest_bytes(
+    project_tmp,
+    monkeypatch,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
-
-    monkeypatch.setattr("ai_sdlc_harness.generate._timestamp", lambda: "2026-07-08T00:00:00+00:00")
+    monkeypatch.setattr(
+        generate_module,
+        "_timestamp",
+        lambda: "2026-07-30T00:00:00+00:00",
+    )
     assert run_generate(project_tmp, slug)[0] == 0
-    path_text = f".harness/tasks/{slug}/generated/agent-workset.md"
-    first_hash = _manifest_entry(project_tmp, path_text)["sha256"]
-
-    monkeypatch.setattr("ai_sdlc_harness.generate._timestamp", lambda: "2026-07-08T00:00:01+00:00")
-    code, messages = run_generate(project_tmp, slug)
-    second_hash = _manifest_entry(project_tmp, path_text)["sha256"]
-
-    assert code == 0
-    assert f"refresh file {path_text}" in messages
-    assert first_hash != second_hash
-
-
-def test_generate_skips_manifest_refresh_when_content_is_byte_identical(project_tmp, monkeypatch):
-    slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    monkeypatch.setattr("ai_sdlc_harness.generate._timestamp", lambda: "2026-07-08T00:00:00+00:00")
     assert run_generate(project_tmp, slug)[0] == 0
-    manifest_before = (project_tmp / ".harness" / "manifest.json").read_bytes()
+    workset_before = _workset_path(project_tmp, slug).read_bytes()
+    context_manifest_before = _context_manifest_path(project_tmp, slug).read_bytes()
+    manifest_before = _manifest_path(project_tmp).read_bytes()
 
     code, messages = run_generate(project_tmp, slug)
 
     assert code == 0
     assert "skip unchanged file .harness/tasks/generate-me/generated/agent-workset.md" in messages
+    assert "skip unchanged file .harness/tasks/generate-me/generated/context-manifest.yaml" in messages
     assert "skip existing manifest .harness/manifest.json" in messages
-    assert (project_tmp / ".harness" / "manifest.json").read_bytes() == manifest_before
+    assert _workset_path(project_tmp, slug).read_bytes() == workset_before
+    assert _context_manifest_path(project_tmp, slug).read_bytes() == context_manifest_before
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
 
 
-def test_generate_does_not_rewrite_hash_drift_without_force(project_tmp):
+def test_changed_workset_is_persisted_before_manifest_hash_is_recorded(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    monkeypatch.setattr(
+        generate_module,
+        "_timestamp",
+        lambda: "2026-07-30T00:00:00+00:00",
+    )
+    assert run_generate(project_tmp, slug)[0] == 0
+    first_hash = _manifest_entry(
+        project_tmp,
+        ".harness/tasks/generate-me/generated/agent-workset.md",
+    )["sha256"]
+    monkeypatch.setattr(
+        generate_module,
+        "_timestamp",
+        lambda: "2026-07-30T00:00:01+00:00",
+    )
+
+    code, messages = run_generate(project_tmp, slug)
+
+    second_entry = _manifest_entry(
+        project_tmp,
+        ".harness/tasks/generate-me/generated/agent-workset.md",
+    )
+    assert code == 0
+    assert "refresh file .harness/tasks/generate-me/generated/agent-workset.md" in messages
+    assert second_entry["sha256"] != first_hash
+    assert verify_project(project_tmp) == (
+        0,
+        ["AI SDLC Harness verification passed"],
+    )
+
+
+def test_verify_passes_immediately_after_successful_generate(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_generate(project_tmp, slug)[0] == 0
+
+    assert verify_project(project_tmp) == (
+        0,
+        ["AI SDLC Harness verification passed"],
+    )
+
+
+def test_verify_fails_when_manifest_managed_workset_is_missing(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_generate(project_tmp, slug)[0] == 0
+    _workset_path(project_tmp, slug).unlink()
+
+    code, messages = verify_project(project_tmp)
+
+    assert code == 1
+    assert (
+        "- missing file "
+        ".harness/tasks/generate-me/generated/agent-workset.md"
+    ) in messages
+
+
+def test_verify_fails_when_manifest_managed_workset_hash_drifts(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_generate(project_tmp, slug)[0] == 0
+    _workset_path(project_tmp, slug).write_text(
+        "changed outside generate\n",
+        encoding="utf-8",
+    )
+
+    code, messages = verify_project(project_tmp)
+
+    assert code == 1
+    assert (
+        "- hash drift detected for "
+        ".harness/tasks/generate-me/generated/agent-workset.md"
+    ) in messages
+
+
+def test_verify_does_not_require_workset_for_initialized_task(project_tmp):
+    slug = _start_sample_task(project_tmp)
+
+    assert not _workset_path(project_tmp, slug).exists()
+    assert verify_project(project_tmp) == (
+        0,
+        ["AI SDLC Harness verification passed"],
+    )
+
+
+def test_generate_refuses_managed_drift_without_force(project_tmp):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     assert run_generate(project_tmp, slug)[0] == 0
     workset = _workset_path(project_tmp, slug)
     workset.write_text("custom workset\n", encoding="utf-8")
-    manifest_before = (project_tmp / ".harness" / "manifest.json").read_bytes()
+    manifest_before = _manifest_path(project_tmp).read_bytes()
 
     code, messages = run_generate(project_tmp, slug)
 
     assert code == 1
     assert "hash drift detected for .harness/tasks/generate-me/generated/agent-workset.md" in messages
     assert workset.read_text(encoding="utf-8") == "custom workset\n"
-    assert (project_tmp / ".harness" / "manifest.json").read_bytes() == manifest_before
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
 
 
-def test_generate_force_overwrites_only_manifest_managed_workset(project_tmp):
+def test_generate_force_overwrites_only_managed_workset_and_preserves_user_note(
+    project_tmp,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     assert run_generate(project_tmp, slug)[0] == 0
@@ -746,79 +1172,521 @@ def test_generate_never_overwrites_unmanaged_existing_workset(project_tmp):
     assert init_project(project_tmp)[0] == 0
     assert start_task(project_tmp, "Blocked workset")[0] == 0
     slug = "blocked-workset"
-    _fill_task_inputs(project_tmp, slug)
     workset = _workset_path(project_tmp, slug)
     workset.parent.mkdir()
     workset.write_text("user owned\n", encoding="utf-8")
-    manifest_before = (project_tmp / ".harness" / "manifest.json").read_bytes()
+    manifest_before = _manifest_path(project_tmp).read_bytes()
 
     code, messages = run_generate(project_tmp, slug, force=True)
 
     assert code == 1
-    assert "unmanaged existing file .harness/tasks/blocked-workset/generated/agent-workset.md" in messages
+    assert (
+        "unmanaged existing file "
+        ".harness/tasks/blocked-workset/generated/agent-workset.md"
+    ) in messages
     assert workset.read_text(encoding="utf-8") == "user owned\n"
-    assert (project_tmp / ".harness" / "manifest.json").read_bytes() == manifest_before
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
 
 
-def test_verify_passes_after_generate(project_tmp):
+def test_unsafe_managed_output_path_fails_without_preparation_or_private_path(
+    project_tmp,
+    monkeypatch,
+):
     slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    assert run_generate(project_tmp, slug)[0] == 0
+    prepared = False
 
-    code, messages = verify_project(project_tmp)
+    def fail_resolution(*_):
+        raise generate_module.PathSafetyError("private absolute path")
 
-    assert code == 0
-    assert messages == ["AI SDLC Harness verification passed"]
+    def unexpected_preparation(*_):
+        nonlocal prepared
+        prepared = True
+        raise AssertionError("preparation must not run")
 
+    monkeypatch.setattr(
+        generate_module,
+        "resolve_managed_output_under_root",
+        fail_resolution,
+    )
+    monkeypatch.setattr(
+        generate_module,
+        "_prepare_generation",
+        unexpected_preparation,
+    )
 
-def test_verify_fails_when_manifest_managed_workset_is_missing(project_tmp):
-    slug = _start_sample_task(project_tmp)
-    _fill_task_inputs(project_tmp, slug)
-    assert run_generate(project_tmp, slug)[0] == 0
-    _workset_path(project_tmp, slug).unlink()
-
-    code, messages = verify_project(project_tmp)
+    code, messages = run_generate(project_tmp, slug)
 
     assert code == 1
-    assert any("missing file .harness/tasks/generate-me/generated/agent-workset.md" in message for message in messages)
+    assert not prepared
+    assert "safely inspect both generate-owned output paths" in messages[0]
+    assert "private absolute path" not in "\n".join(messages)
 
 
-def test_verify_fails_when_manifest_managed_workset_hash_drifts(project_tmp):
+def test_output_persistence_failure_is_bounded_and_does_not_refresh_manifest(
+    project_tmp,
+    monkeypatch,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
-    assert run_generate(project_tmp, slug)[0] == 0
-    _workset_path(project_tmp, slug).write_text("changed\n", encoding="utf-8")
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+    refreshed = False
 
-    code, messages = verify_project(project_tmp)
+    def fail_persistence(*_):
+        raise OSError("private absolute path")
+
+    def unexpected_manifest(*_, **__):
+        nonlocal refreshed
+        refreshed = True
+
+    monkeypatch.setattr(generate_module, "persist_exact_bytes", fail_persistence)
+    monkeypatch.setattr(generate_module, "persist_manifest_model", unexpected_manifest)
+
+    code, messages = run_generate(project_tmp, slug)
 
     assert code == 1
-    assert any("hash drift detected for .harness/tasks/generate-me/generated/agent-workset.md" in message for message in messages)
+    assert messages[0] == "Could not persist agent workset."
+    assert "private absolute path" not in "\n".join(messages)
+    assert not refreshed
+    assert not _workset_path(project_tmp, slug).exists()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
 
 
-def test_verify_does_not_require_every_task_to_have_workset(project_tmp):
-    _start_sample_task(project_tmp)
+def test_manifest_refresh_failure_is_bounded_after_confirmed_workset_persistence(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+    monkeypatch.setattr(
+        generate_module,
+        "persist_manifest_model",
+        lambda *_, **__: (_ for _ in ()).throw(OSError("private absolute path")),
+    )
 
-    code, messages = verify_project(project_tmp)
+    code, messages = run_generate(project_tmp, slug)
 
-    assert code == 0
-    assert messages == ["AI SDLC Harness verification passed"]
+    assert code == 1
+    assert messages[0] == (
+        "Generated files were persisted, but the Harness manifest could not be refreshed."
+    )
+    assert "private absolute path" not in "\n".join(messages)
+    assert _workset_path(project_tmp, slug).is_file()
+    assert _context_manifest_path(project_tmp, slug).is_file()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
 
 
-def test_status_reports_manifest_managed_workset_count_and_remains_read_only(project_tmp):
+def test_status_counts_only_manifest_managed_worksets_and_remains_read_only(
+    project_tmp,
+):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     assert run_generate(project_tmp, slug)[0] == 0
-    unmanaged_task = project_tmp / ".harness" / "tasks" / "unmanaged-task" / "generated"
+    unmanaged_task = (
+        project_tmp / ".harness" / "tasks" / "unmanaged-task" / "generated"
+    )
     unmanaged_task.mkdir(parents=True)
-    (unmanaged_task / "agent-workset.md").write_text("not managed\n", encoding="utf-8")
+    (unmanaged_task / "agent-workset.md").write_text(
+        "not managed\n",
+        encoding="utf-8",
+    )
     tracked = [project_tmp / relative for relative in BASE_MANAGED_FILES]
     tracked.extend(_task_path(project_tmp, slug, filename) for filename in TASK_FILES)
     tracked.append(_workset_path(project_tmp, slug))
+    tracked.append(_context_manifest_path(project_tmp, slug))
     before = {path: path.read_bytes() for path in tracked}
 
     code, messages = status_project(project_tmp)
-    after = {path: path.read_bytes() for path in tracked}
 
     assert code == 0
     assert "manifest-managed generated worksets: 1" in messages
-    assert before == after
+    assert {path: path.read_bytes() for path in tracked} == before
+
+
+def test_context_manifest_is_managed_without_generate_provenance(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+
+    assert run_generate(project_tmp, slug)[0] == 0
+
+    manifest = _manifest(project_tmp)
+    workset_entry = _manifest_entry(
+        project_tmp,
+        ".harness/tasks/generate-me/generated/agent-workset.md",
+    )
+    assert _context_manifest_path(project_tmp, slug).is_file()
+    assert "provenance" not in workset_entry
+    assert (
+        ".harness/tasks/generate-me/generated/context-manifest.yaml"
+        in {entry["path"] for entry in manifest["managed_files"]}
+    )
+    assert manifest.get("generated_artifact_provenance", []) == []
+
+
+def test_context_manifest_is_built_from_selection_and_confirmed_workset_snapshot(
+    project_tmp,
+):
+    slug, preparation = _prepared_project(project_tmp)
+    workset_text = _render_workset(
+        slug=slug,
+        generated_at="2026-08-01T00:00:00+00:00",
+        selection=preparation.selection,
+        findings=preparation.findings,
+    )
+    workset_bytes = workset_text.encode("utf-8")
+    workset_hash = sha256_bytes(workset_bytes)
+
+    document = _build_context_manifest(
+        preparation=preparation,
+        workset_text=workset_text,
+        workset_sha256=workset_hash,
+    )
+    rendered = render_context_manifest_yaml(document)
+    parsed = parse_context_manifest_yaml(rendered)
+
+    assert document.schema_version == 1
+    assert document.artifact_path == (
+        ".harness/tasks/generate-me/generated/context-manifest.yaml"
+    )
+    assert document.artifact_role == "context_selection_manifest"
+    assert document.authority == "non_authoritative"
+    assert document.edit_model == "generated_do_not_edit"
+    assert document.task_slug == slug
+    assert [item.path for item in document.source_artifacts] == [
+        artifact.path for artifact in preparation.selection.source_artifacts
+    ]
+    assert [item.sha256 for item in document.source_artifacts] == [
+        artifact.source_sha256
+        for artifact in preparation.selection.source_artifacts
+    ]
+    assert len(document.source_artifacts) == 7
+    assert len(document.generated_artifacts) == 1
+    assert document.generated_artifacts[0].path.endswith("/agent-workset.md")
+    assert document.generated_artifacts[0].sha256 == workset_hash
+    assert document.artifact_path not in {
+        item.path for item in document.generated_artifacts
+    }
+    workset_entry = next(
+        item
+        for item in document.context_entries
+        if item.entry_id == "agent_workset_output"
+    )
+    assert workset_entry.existence.value == "present"
+    assert workset_entry.inclusion_mode.value == "excluded"
+    assert workset_entry.size_estimate.selected.bytes == 0
+    assert workset_entry.size_estimate.source.bytes == len(workset_bytes)
+    assert workset_entry.size_estimate.source.characters == len(workset_text)
+    context_output_entry = next(
+        item
+        for item in document.context_entries
+        if item.entry_id == "context_manifest_output"
+    )
+    original_context_output = next(
+        item
+        for item in preparation.selection.context_entries
+        if item.entry_id == "context_manifest_output"
+    )
+    assert context_output_entry == original_context_output
+    assert document.findings == preparation.findings
+    assert document.budget == preparation.selection.budget
+    assert parsed == document
+    assert render_context_manifest_yaml(parsed) == rendered
+    assert render_context_manifest_yaml(document) == rendered
+    assert "self_hash" not in rendered
+
+
+def test_context_manifest_construction_does_not_reread_task_sources(
+    project_tmp,
+    monkeypatch,
+):
+    slug, preparation = _prepared_project(project_tmp)
+    expected_hashes = tuple(
+        artifact.source_sha256 for artifact in preparation.selection.source_artifacts
+    )
+    workset_text = _render_workset(
+        slug=slug,
+        generated_at="2026-08-01T00:00:00+00:00",
+        selection=preparation.selection,
+        findings=preparation.findings,
+    )
+    monkeypatch.setattr(
+        Path,
+        "read_bytes",
+        lambda *_: pytest.fail("context manifest construction reread a source"),
+    )
+
+    document = _build_context_manifest(
+        preparation=preparation,
+        workset_text=workset_text,
+        workset_sha256=sha256_bytes(workset_text.encode("utf-8")),
+    )
+
+    assert tuple(item.sha256 for item in document.source_artifacts) == expected_hashes
+
+
+def test_successful_generate_manages_exact_pair_and_preserves_lineage(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_preflight(project_tmp, slug)[0] == 0
+    assert run_spec(project_tmp, slug)[0] == 0
+    provenance_before = _manifest(project_tmp)["generated_artifact_provenance"]
+    managed_before = {
+        item["path"]: item for item in _manifest(project_tmp)["managed_files"]
+    }
+
+    assert run_generate(project_tmp, slug)[0] == 0
+
+    manifest = _manifest(project_tmp)
+    by_path = {item["path"]: item for item in manifest["managed_files"]}
+    for target in (
+        _workset_path(project_tmp, slug),
+        _context_manifest_path(project_tmp, slug),
+    ):
+        relative = target.relative_to(project_tmp).as_posix()
+        record = by_path[relative]
+        assert record["protected"] is True
+        assert record["hash_algorithm"] == "sha256"
+        assert record["sha256"] == sha256_bytes(target.read_bytes())
+    assert manifest["generated_artifact_provenance"] == provenance_before
+    assert {
+        path: record
+        for path, record in by_path.items()
+        if not path.endswith(("agent-workset.md", "context-manifest.yaml"))
+    } == managed_before
+    assert all(
+        "agent-workset.md" not in record["output_path"]
+        and "context-manifest.yaml" not in record["output_path"]
+        for record in manifest["generated_artifact_provenance"]
+    )
+    assert verify_project(project_tmp)[0] == 0
+
+
+def test_generate_preserves_legacy_v1_manifest_schema(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    data = _manifest(project_tmp)
+    data.pop("manifest_schema_version")
+    data.pop("generated_artifact_provenance")
+    _write_manifest_data(project_tmp, data)
+    _fill_task_inputs(project_tmp, slug)
+
+    assert run_generate(project_tmp, slug)[0] == 0
+
+    persisted = _manifest(project_tmp)
+    assert "manifest_schema_version" not in persisted
+    assert "generated_artifact_provenance" not in persisted
+
+
+@pytest.mark.parametrize("filename", ["agent-workset.md", "context-manifest.yaml"])
+def test_verify_fails_for_missing_or_drifted_generate_output(project_tmp, filename):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_generate(project_tmp, slug)[0] == 0
+    target = _workset_path(project_tmp, slug).parent / filename
+    relative = target.relative_to(project_tmp).as_posix()
+
+    target.unlink()
+    code, messages = verify_project(project_tmp)
+    assert code == 1
+    assert any(f"missing file {relative}" in message for message in messages)
+
+    assert run_generate(project_tmp, slug)[0] == 0
+    target.write_bytes(b"drifted\r\n")
+    code, messages = verify_project(project_tmp)
+    assert code == 1
+    assert any(f"hash drift detected for {relative}" in message for message in messages)
+
+
+def test_legacy_managed_workset_only_migration_does_not_rewrite_workset(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    monkeypatch.setattr(
+        generate_module,
+        "_timestamp",
+        lambda: "2026-08-01T00:00:00+00:00",
+    )
+    assert run_generate(project_tmp, slug)[0] == 0
+    workset_before = _workset_path(project_tmp, slug).read_bytes()
+    context_target = _context_manifest_path(project_tmp, slug)
+    context_target.unlink()
+    data = _manifest(project_tmp)
+    data["managed_files"] = [
+        record
+        for record in data["managed_files"]
+        if record["path"] != context_target.relative_to(project_tmp).as_posix()
+    ]
+    _write_manifest_data(project_tmp, data)
+
+    code, messages = run_generate(project_tmp, slug)
+
+    assert code == 0
+    assert _workset_path(project_tmp, slug).read_bytes() == workset_before
+    assert "skip unchanged file .harness/tasks/generate-me/generated/agent-workset.md" in messages
+    assert "create file .harness/tasks/generate-me/generated/context-manifest.yaml" in messages
+    assert context_target.is_file()
+
+
+def test_clean_malformed_managed_context_manifest_is_regenerated(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_generate(project_tmp, slug)[0] == 0
+    target = _context_manifest_path(project_tmp, slug)
+    malformed = b"schema_version: [malformed\n"
+    target.write_bytes(malformed)
+    data = _manifest(project_tmp)
+    record = next(
+        item for item in data["managed_files"] if item["path"].endswith("context-manifest.yaml")
+    )
+    record["sha256"] = sha256_bytes(malformed)
+    _write_manifest_data(project_tmp, data)
+
+    code, _ = run_generate(project_tmp, slug)
+
+    assert code == 0
+    parsed = parse_context_manifest_yaml(target.read_text(encoding="utf-8"))
+    assert parsed.task_slug == slug
+
+
+def test_existing_unmanaged_context_manifest_blocks_even_with_force(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    target = _context_manifest_path(project_tmp, slug)
+    target.parent.mkdir()
+    target.write_text("user owned\n", encoding="utf-8")
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+
+    code, messages = run_generate(project_tmp, slug, force=True)
+
+    assert code == 1
+    assert f"unmanaged existing file {target.relative_to(project_tmp).as_posix()}" in messages
+    assert target.read_text(encoding="utf-8") == "user owned\n"
+    assert not _workset_path(project_tmp, slug).exists()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
+
+
+def test_context_manifest_managed_drift_requires_force_and_can_recover(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_generate(project_tmp, slug)[0] == 0
+    target = _context_manifest_path(project_tmp, slug)
+    target.write_text("drifted\n", encoding="utf-8")
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+
+    code, messages = run_generate(project_tmp, slug)
+    assert code == 1
+    assert any("hash drift detected" in message for message in messages)
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
+
+    code, _ = run_generate(project_tmp, slug, force=True)
+    assert code == 0
+    assert parse_context_manifest_yaml(target.read_text(encoding="utf-8")).task_slug == slug
+
+
+@pytest.mark.parametrize(
+    "private_detail",
+    [
+        "unsafe final output at C:/private/final",
+        "symlinked parent at C:/private/parent",
+    ],
+)
+def test_context_manifest_safety_is_checked_before_workset_persistence(
+    project_tmp,
+    monkeypatch,
+    private_detail,
+):
+    slug = _start_sample_task(project_tmp)
+    resolved: list[str] = []
+    persisted = False
+    original = generate_module.resolve_managed_output_under_root
+
+    def resolve(root, path):
+        resolved.append(str(path))
+        if str(path).endswith("context-manifest.yaml"):
+            raise generate_module.PathSafetyError(private_detail)
+        return original(root, path)
+
+    def unexpected_persist(*_):
+        nonlocal persisted
+        persisted = True
+        raise AssertionError("persistence must not run")
+
+    monkeypatch.setattr(generate_module, "resolve_managed_output_under_root", resolve)
+    monkeypatch.setattr(generate_module, "persist_exact_bytes", unexpected_persist)
+
+    code, messages = run_generate(project_tmp, slug, force=True)
+
+    assert code == 1
+    assert resolved == [
+        ".harness/tasks/generate-me/generated/agent-workset.md",
+        ".harness/tasks/generate-me/generated/context-manifest.yaml",
+    ]
+    assert not persisted
+    assert private_detail not in "\n".join(messages)
+
+
+def test_persistence_order_is_pair_then_single_manifest_update(project_tmp, monkeypatch):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    calls: list[str] = []
+    real_persist = generate_module.persist_exact_bytes
+    real_manifest_persist = generate_module.persist_manifest_model
+
+    def persist(path, content):
+        calls.append(path.name)
+        return real_persist(path, content)
+
+    def persist_manifest(root, document):
+        calls.append("manifest.json")
+        return real_manifest_persist(root, document)
+
+    monkeypatch.setattr(generate_module, "persist_exact_bytes", persist)
+    monkeypatch.setattr(generate_module, "persist_manifest_model", persist_manifest)
+
+    assert run_generate(project_tmp, slug)[0] == 0
+    assert calls == ["agent-workset.md", "context-manifest.yaml", "manifest.json"]
+
+
+def test_context_manifest_persistence_failure_leaves_main_manifest_unchanged(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+    real_persist = generate_module.persist_exact_bytes
+    calls: list[str] = []
+
+    def persist(path, content):
+        calls.append(path.name)
+        if path.name == "context-manifest.yaml":
+            raise OSError("C:/private/context failure")
+        return real_persist(path, content)
+
+    monkeypatch.setattr(generate_module, "persist_exact_bytes", persist)
+
+    code, messages = run_generate(project_tmp, slug)
+
+    assert code == 1
+    assert calls == ["agent-workset.md", "context-manifest.yaml"]
+    assert _workset_path(project_tmp, slug).is_file()
+    assert not _context_manifest_path(project_tmp, slug).exists()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before
+    assert "generated pair is incomplete" in "\n".join(messages)
+    assert "C:/private" not in "\n".join(messages)
+
+
+def test_force_dry_run_reports_both_outputs_and_writes_nothing(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    manifest_before = _manifest_path(project_tmp).read_bytes()
+
+    code, messages = run_generate(project_tmp, slug, dry_run=True, force=True)
+
+    assert code == 0
+    assert any("agent-workset.md" in message and "would" in message for message in messages)
+    assert any("context-manifest.yaml" in message and "would" in message for message in messages)
+    assert messages[-1] == "dry run; no files written"
+    assert not _workset_path(project_tmp, slug).exists()
+    assert not _context_manifest_path(project_tmp, slug).exists()
+    assert _manifest_path(project_tmp).read_bytes() == manifest_before

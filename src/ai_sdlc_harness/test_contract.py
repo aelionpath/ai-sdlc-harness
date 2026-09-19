@@ -6,12 +6,32 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Mapping
 
 from .constants import TEST_CONTRACT_REVIEW_FILENAME, TASK_SLUG_PATTERN
 from .detect import detect_project_signals
-from .files import read_text, resolve_under_root, write_text
-from .manifest import load_manifest, sha256_file, write_manifest
+from .files import (
+    persist_exact_bytes,
+    resolve_managed_output_under_root,
+    resolve_under_root,
+)
+from .lineage import (
+    CapturedDependency,
+    build_provenance_record,
+    capture_dependencies,
+    lineage_definition_for_task,
+    provenance_dependencies,
+    snapshot_repository_observations,
+)
+from .manifest import (
+    build_managed_file_record,
+    load_manifest,
+    load_manifest_model,
+    persist_manifest_model,
+    remove_provenance_records,
+    replace_managed_and_provenance_records,
+    sha256_file,
+)
 
 
 TASK_SLUG_RE = re.compile(TASK_SLUG_PATTERN)
@@ -52,6 +72,7 @@ HEADING_ALIASES = {
         "Negative And Edge Cases",
     ),
     "commands": (
+        "Commands And Checks Run",
         "Commands And Tests To Run",
         "Commands And Tests To Run Later",
         "Verification Commands",
@@ -202,15 +223,22 @@ def _readiness_state(text: str) -> str:
     return "has substantive content"
 
 
-def _read_input(root: Path, slug: str, filename: str) -> InputReadiness:
-    relative = _artifact_path(slug, filename)
-    target = resolve_under_root(root, relative)
-    if not target.exists():
+def _read_input(
+    slug: str,
+    filename: str,
+    captured: Mapping[str, CapturedDependency],
+) -> InputReadiness:
+    capture = captured[_artifact_path(slug, filename).as_posix()]
+    state = capture.record.dependency_state
+    if state == "missing":
         return InputReadiness(filename, present=False, readable=False, state="missing", message="missing", text="")
-    if not target.is_file():
+    if state == "not_regular":
         return InputReadiness(filename, present=True, readable=False, state="unreadable", message="not a regular file", text="")
+    if state == "unreadable":
+        return InputReadiness(filename, present=True, readable=False, state="unreadable", message="unreadable", text="")
     try:
-        text = read_text(target)
+        assert capture.content is not None
+        text = capture.content.decode("utf-8")
     except Exception as exc:
         return InputReadiness(filename, present=True, readable=False, state="unreadable", message=f"unreadable: {exc}", text="")
     state = _readiness_state(text)
@@ -292,8 +320,8 @@ def _acceptance_sections(acceptance: InputReadiness) -> dict[str, SectionReadine
 
 def _verification_sections(verification: InputReadiness) -> dict[str, SectionReadiness]:
     return {
-        "commands": _section_readiness(verification, "verification commands", HEADING_ALIASES["commands"]),
-        "results": _section_readiness(verification, "expected results", HEADING_ALIASES["results"]),
+        "commands": _section_readiness(verification, "commands and checks run", HEADING_ALIASES["commands"]),
+        "results": _section_readiness(verification, "observed results", HEADING_ALIASES["results"]),
         "not_run": _section_readiness(verification, "test exceptions / not-run rationale", HEADING_ALIASES["not_run"]),
         "manual_review": _section_readiness(verification, "manual review checks", HEADING_ALIASES["manual_review"]),
     }
@@ -338,22 +366,11 @@ def _verification_readiness(verification: InputReadiness) -> dict[str, str]:
 def _has_test_exception_rationale(
     *,
     test_contract: InputReadiness,
-    verification_input: InputReadiness,
-    verification_sections: dict[str, SectionReadiness],
 ) -> bool:
-    text = "\n".join(
-        value
-        for value in (
-            _non_placeholder_text(test_contract.text if test_contract.readable else ""),
-            _non_placeholder_text(verification_input.text if verification_input.readable else ""),
-        )
-        if value
-    )
+    text = _non_placeholder_text(test_contract.text if test_contract.readable else "")
     if not text or not NOT_RUN_RE.search(text):
         return False
-    return bool(RATIONALE_RE.search(text)) and (
-        verification_sections["commands"].ready or verification_sections["manual_review"].ready
-    )
+    return bool(RATIONALE_RE.search(text))
 
 
 def _has_unrationalized_not_run_text(*inputs: InputReadiness) -> bool:
@@ -374,9 +391,7 @@ def _findings(
     evidence: InputReadiness,
     acceptance_sections: dict[str, SectionReadiness],
     test_sections: dict[str, SectionReadiness],
-    verification_sections: dict[str, SectionReadiness],
     evidence_sections: dict[str, SectionReadiness],
-    verification: dict[str, str],
     preflight: InputReadiness,
 ) -> list[Finding]:
     findings: list[Finding] = []
@@ -399,8 +414,6 @@ def _findings(
 
     exception_rationale = _has_test_exception_rationale(
         test_contract=test_contract,
-        verification_input=verification_input,
-        verification_sections=verification_sections,
     )
     desired = test_sections["desired"]
     if not desired.ready and not exception_rationale:
@@ -415,10 +428,6 @@ def _findings(
         if not section.ready:
             findings.append(Finding("warning", f"{message} are {section.message}."))
 
-    if not verification_sections["commands"].ready:
-        findings.append(Finding("warning", "verification commands are missing."))
-    if not verification_sections["results"].ready and not verification_sections["manual_review"].ready:
-        findings.append(Finding("warning", "expected results or manual review checks are missing."))
     if _has_unrationalized_not_run_text(test_contract, verification_input, evidence):
         findings.append(Finding("warning", "test exceptions / not-run rationale is missing."))
 
@@ -464,10 +473,8 @@ def _recommended_actions(findings: list[Finding]) -> list[str]:
         actions.append("Add regression test intent for behavior that must not break again.")
     if any("negative" in finding.message or "edge" in finding.message for finding in warnings):
         actions.append("Add negative and edge case test intent.")
-    if any("verification commands" in finding.message for finding in warnings):
-        actions.append("Record the expected test or verification commands in verification.md.")
-    if any("expected results" in finding.message or "not-run" in finding.message for finding in warnings):
-        actions.append("Record expected results, review checks, or a rationale for tests not run.")
+    if any("not-run" in finding.message for finding in warnings):
+        actions.append("Record the check as not run in verification.md and explain why.")
     if any("evidence expectations" in finding.message for finding in warnings):
         actions.append("Record the expected implementation and verification evidence in evidence.md.")
     if any("no test framework" in finding.message for finding in warnings):
@@ -544,7 +551,7 @@ def _render_report(
             _section_line(test_sections["regression"]),
             _section_line(test_sections["negative"]),
             "",
-            "## Verification Readiness",
+            "## Verification Record",
             "",
             _presence_line(verification_input),
             _section_line(verification_sections["commands"]),
@@ -614,7 +621,7 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
 
     review_path = _review_path(task_slug)
     try:
-        review_target = resolve_under_root(root, review_path)
+        review_target = resolve_managed_output_under_root(root, review_path)
         entries = _load_manifest_entries(root)
     except Exception as exc:
         return 1, [f"Could not read harness manifest or resolve test-contract review path: {exc}"]
@@ -637,12 +644,34 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
                 "refusing to overwrite manifest-managed test-contract review report without --force",
             ]
 
+    try:
+        expected = lineage_definition_for_task(
+            "test_contract_review",
+            task_slug,
+        )
+        captures = capture_dependencies(root, expected)
+        dependency_snapshot = provenance_dependencies(captures)
+        captured_by_path = {
+            item.record.dependency_path: item for item in captures
+        }
+        observation_snapshot = snapshot_repository_observations(root, expected)
+    except Exception as exc:
+        return 1, [f"Could not snapshot test-contract provenance inputs: {exc}"]
+
     signals = detect_project_signals(root)
-    acceptance = _read_input(root, task_slug, "acceptance.md")
-    test_contract = _read_input(root, task_slug, "test-contract.md")
-    verification_input = _read_input(root, task_slug, "verification.md")
-    evidence = _read_input(root, task_slug, "evidence.md")
-    preflight = _read_input(root, task_slug, "preflight.md")
+    acceptance = _read_input(task_slug, "acceptance.md", captured_by_path)
+    test_contract = _read_input(
+        task_slug,
+        "test-contract.md",
+        captured_by_path,
+    )
+    verification_input = _read_input(
+        task_slug,
+        "verification.md",
+        captured_by_path,
+    )
+    evidence = _read_input(task_slug, "evidence.md", captured_by_path)
+    preflight = _read_input(task_slug, "preflight.md", captured_by_path)
     acceptance_sections = _acceptance_sections(acceptance)
     test_sections = _all_test_contract_sections(test_contract)
     verification_sections = _verification_sections(verification_input)
@@ -656,14 +685,13 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
         evidence=evidence,
         acceptance_sections=acceptance_sections,
         test_sections=test_sections,
-        verification_sections=verification_sections,
         evidence_sections=evidence_sections,
-        verification=verification,
         preflight=preflight,
     )
+    generated_at = _timestamp()
     content = _render_report(
         slug=task_slug,
-        generated_at=_timestamp(),
+        generated_at=generated_at,
         signals=signals,
         acceptance=acceptance,
         test_contract=test_contract,
@@ -677,6 +705,17 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
         verification=verification,
         findings=findings,
     )
+    try:
+        stable_observations = snapshot_repository_observations(root, expected)
+    except Exception as exc:
+        return 1, [
+            f"Could not confirm test-contract repository observations: {exc}"
+        ]
+    if stable_observations != observation_snapshot:
+        return 1, [
+            "Repository observations changed during test-contract review; "
+            "no files written."
+        ]
 
     messages = [f"test-contract review report: {path_text}", _summarize(findings)]
     if dry_run:
@@ -685,15 +724,56 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
         messages.append("dry run; no files written")
         return 0, messages
 
-    if review_target.exists() and review_target.read_text(encoding="utf-8") == content:
-        messages.append(f"skip unchanged file {path_text}")
-        messages.append("skip existing manifest .harness/manifest.json")
-        return 0, messages
+    content_bytes = content.encode("utf-8")
+    existed_before = review_target.exists()
+    try:
+        output_will_change = (
+            not existed_before or review_target.read_bytes() != content_bytes
+        )
+        if output_will_change:
+            manifest_path = resolve_under_root(root, ".harness/manifest.json")
+            current_manifest = load_manifest_model(manifest_path)
+            invalidated = remove_provenance_records(
+                current_manifest,
+                [path_text],
+                generated_at=generated_at,
+            )
+            if invalidated != current_manifest:
+                persist_manifest_model(root, invalidated)
 
-    action = "refresh" if review_target.exists() else "create"
-    write_text(review_target, content)
-    write_manifest(root, extra_managed_paths=[review_path])
-    messages.append(f"{action} file {path_text}")
-    messages.append("refreshed manifest .harness/manifest.json")
-    messages.append("root AGENTS.md and CLAUDE.md were not modified")
+        persisted = persist_exact_bytes(review_target, content_bytes)
+        provenance = build_provenance_record(
+            expected,
+            output_sha256=persisted.sha256,
+            dependencies=dependency_snapshot,
+            repository_observations=observation_snapshot,
+        )
+        managed = build_managed_file_record(root, path_text)
+        manifest_path = resolve_under_root(root, ".harness/manifest.json")
+        current_manifest = load_manifest_model(manifest_path)
+        updated_manifest = replace_managed_and_provenance_records(
+            current_manifest,
+            [managed],
+            [provenance],
+            generated_at=generated_at,
+            upgrade_to_v2=True,
+        )
+        manifest_changed = updated_manifest != current_manifest
+        if manifest_changed:
+            persist_manifest_model(root, updated_manifest)
+    except Exception as exc:
+        return 1, [
+            f"Could not persist test-contract review and provenance: {exc}"
+        ]
+
+    if persisted.changed:
+        action = "refresh" if existed_before else "create"
+        messages.append(f"{action} file {path_text}")
+    else:
+        messages.append(f"skip unchanged file {path_text}")
+    if manifest_changed:
+        messages.append("refreshed manifest .harness/manifest.json")
+        messages.append("root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified")
+    else:
+        messages.append("skip existing manifest .harness/manifest.json")
     return 0, messages

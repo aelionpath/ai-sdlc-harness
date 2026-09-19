@@ -6,22 +6,32 @@ Keep changes focused on the implemented CLI scaffold, safe file handling, docume
 
 ## Branch And PR Expectations
 
-Contributors should branch from `integration` and open pull requests against `integration`. `main` is release-stable; maintainers merge to `main` only after release validation.
+Contributors should branch from `main` and open pull requests against `main`.
 
 Issues may be opened normally. Keep proposed changes concrete and scoped.
+
+## Development Setup
+
+Create and activate a virtual environment in a source checkout, then install the project and its test dependencies in editable mode:
+
+```bash
+python -m venv .venv
+python -m pip install -e ".[test]"
+```
+
+Editable installation is for development of the Harness itself. Ordinary users should install the released package as described in the README and Quickstart.
 
 ## Test Suite Overview
 
 The `/tests` directory tests the harness itself. It does not test user projects, and it does not run user project tests. User project checks remain in the user's repository and can be recorded in harness task artifacts as evidence.
 
-The regression suite is pytest-based and includes:
+The exported public regression suite is pytest-based and includes:
 
 - unit and small integration tests for helpers and command behavior
 - CLI functional tests
 - artifact-generation tests for task files, reports, worksets, and specs
-- workflow tests across init, task, preflight, spec, generate, evidence, validate, status, and verify
+- workflow tests across init, task, preflight, spec, test-contract, generate, evidence, validate, status, verify, and adapter installation
 - public-content checks for unsupported wording and public-surface expectations
-- release-boundary and hygiene tests for export safety and private/public separation
 
 ## Running Checks
 
@@ -44,7 +54,7 @@ Export the public surface into a separate review checkout before release or rele
 Run tests from the exported public repo before release or release-candidate review:
 
 ```bash
-cd ..\ai-sdlc-harness-public-test
+cd ..\ai-sdlc-harness
 py -m pytest -p no:cacheprovider
 ```
 
@@ -71,4 +81,4 @@ Docs-only changes may not need new tests, but public-facing wording must still a
 
 Do not add private planning files, prompt transcripts, scratch notes, release tooling, local artifacts, local machine paths, secrets, or implementation discussions to public package data, docs, examples, templates, or generated output.
 
-Public docs should describe implemented behavior only. Do not claim that the harness calls AI models, generates code, generates tests, runs tests, scans security, validates compliance, proves correctness, approves work, enforces packs, installs adapters, or modifies root `AGENTS.md` / `CLAUDE.md`.
+Public docs should describe implemented behavior only. Do not claim that the harness calls AI models, generates code, generates tests, runs tests, scans security, validates compliance, proves correctness, approves work, enforces packs, installs adapters implicitly, or modifies root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`.

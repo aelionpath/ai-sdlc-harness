@@ -1,113 +1,98 @@
 # AI SDLC Harness
 
-AI SDLC Harness provides repo-native guardrails for AI-assisted software delivery. It turns a rough task into explicit task artifacts, a task-scoped workset, recorded evidence, and review readiness signals that humans and coding agents can use consistently.
+AI SDLC Harness is a repo-local workflow for bounded, reviewable AI-assisted software changes. It turns a rough request into explicit task artifacts, a task-scoped implementation handoff, factual evidence, and deterministic workflow status that humans and coding agents can follow.
 
-The harness is an artifact-driven workflow. It does not replace the coding agent or reviewer; it gives them bounded context, implementation expectations, and a visible evidence trail.
+The Harness does not call an AI model or implement the task. It supplies the control layer around that work: scope, acceptance criteria, test intent, current generated context, integrity checks, and visible human-review boundaries.
 
-## What It Helps With
+## What It Provides
 
-AI coding-agent work often starts from vague instructions, stale context, missing test expectations, or undocumented assumptions. AI SDLC Harness makes those inputs explicit before implementation starts:
+- Human-owned task files for scope, acceptance criteria, architecture, coupling, test intent, verification, and evidence.
+- Deterministic reports and a bounded `agent-workset.md` generated from those task files.
+- `ai-sdlc status`, which derives the current phase and the next valid action from repository state.
+- Lineage checks that identify missing, stale, fresh, or unknown generated planning artifacts.
+- Validation-currentness and manifest-integrity signals without claiming correctness, security, or approval.
+- Optional repository Agent Skills for Codex, Claude Code, and Gemini CLI.
 
-- task boundaries and non-goals
-- acceptance and test expectations
-- architecture, coupling, and verification notes
-- generated pre-implementation workset context
-- recorded implementation evidence
-- validation signals for human review
-- manifest-managed file integrity checks
-- task-scoped context to reduce unnecessary prompt and token load
+Harness task and control state lives in the repository under `.harness/`, so the task record can be reviewed alongside the change instead of existing only in chat history. Optional agent adapters live at agent-specific paths in the same repository.
 
-You do not need a formal requirements document to start. Begin with a rough task title or copied notes, then refine the generated task artifacts before using the workset for implementation.
+## Quick Start
 
-## Current Command Flow
+Install AI SDLC Harness as an isolated command-line tool:
+
+```bash
+uv tool install ai-sdlc-harness
+ai-sdlc --version
+```
+
+As a secondary option, use `pipx install ai-sdlc-harness`.
+
+Then run the first three commands in the repository you want to govern:
 
 ```bash
 ai-sdlc init
-ai-sdlc task start "Describe the task"
-ai-sdlc preflight --task describe-the-task
-ai-sdlc spec --task describe-the-task
-ai-sdlc test-contract --task describe-the-task
-ai-sdlc generate --task describe-the-task
-# human or coding agent implements the task, updates task artifacts, and records evidence
-ai-sdlc evidence --task describe-the-task
-ai-sdlc validate --task describe-the-task
-ai-sdlc status
-ai-sdlc verify
+ai-sdlc task start "Add request timeout handling"
+ai-sdlc status --task add-request-timeout-handling
 ```
 
-## Generated Artifacts
+Edit the new human-owned files under `.harness/tasks/add-request-timeout-handling/`, especially `task.md`, `acceptance.md`, and `test-contract.md`. Rerun `status` and follow the command or human action shown under `next:`. The Harness will route the task through readiness, specification, test-contract review, implementation handoff, evidence, validation, and final human review.
 
-The harness stores repo-local state under `.harness/`.
+When the phase reaches `implementation`, use:
 
-`ai-sdlc task start` creates user-editable task artifacts under `.harness/tasks/<task-slug>/`, including task scope, acceptance criteria, architecture notes, coupling notes, test contract, verification notes, and evidence notes.
+```text
+.harness/tasks/add-request-timeout-handling/generated/agent-workset.md
+```
 
-`ai-sdlc preflight` creates `preflight.md`, a task-readiness report based on shallow repository signals and task artifact readiness.
+as the bounded handoff for the human or coding agent doing the change. Record only factual results in `evidence.md` and the commands actually run in `verification.md`, then rerun `status`.
 
-`ai-sdlc spec` creates `spec.md` and `requirements.yaml`. The YAML file is an advisory structured requirements projection generated from source task artifacts; it is not the authoritative source of requirements. To change requirements, edit the source task artifacts and rerun `spec`.
+See the [Quickstart](docs/quickstart.md) for the complete walkthrough.
 
-`ai-sdlc test-contract` creates `test-contract-review.md`, a readiness review of existing acceptance, test-contract, and verification intent.
+## Optional Agent Skills
 
-`ai-sdlc generate` creates `generated/agent-workset.md`, the task-scoped context package intended for a human implementer or coding agent before implementation.
+After `ai-sdlc init`, install one repository-scoped adapter or all three:
 
-`ai-sdlc evidence` creates `evidence-report.md`, summarizing recorded implementation evidence and verification notes.
+```bash
+ai-sdlc adapter install codex
+ai-sdlc adapter install claude-code
+ai-sdlc adapter install gemini-cli
+# or: ai-sdlc adapter install all
+```
 
-`ai-sdlc validate` creates `validation-report.md`, summarizing workflow consistency and review readiness signals.
+These commands install a thin Harness skill at the supported repository path for each agent. They do not modify root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`. Existing unmanaged files at the adapter paths are not adopted or overwritten.
 
-`ai-sdlc verify` checks `.harness/` structure and manifest-managed file integrity. It does not evaluate application behavior.
+## Workflow Outcomes
 
-## Context And Token Discipline
+`ai-sdlc status` reports one of four outcomes:
 
-AI-assisted development can become expensive and noisy when every agent session starts by re-reading broad repository context, stale notes, or long prior conversations. AI SDLC Harness is designed to keep implementation context task-scoped.
+- `NEXT` — run the displayed Harness command.
+- `REVIEW_REQUIRED` — a person must edit, review, resolve, or accept the indicated material.
+- `BLOCKED` — correct the reported integrity, safety, or workflow problem before continuing.
+- `COMPLETE` — the Harness workflow record is complete; normal human review and delivery still remain.
 
-Today, the harness supports context discipline by:
+Use `ai-sdlc status --json` for deterministic machine-readable navigation. If more than one task exists, select one explicitly with `--task <task-slug>`.
 
-- keeping task intent in explicit task-local artifacts
-- generating a focused `agent-workset.md` for the current task
-- separating source task artifacts from generated reports
-- projecting explicit acceptance items into advisory `requirements.yaml`
-- using shallow repository signals instead of asking an agent to inspect the whole repo by default
-- recording evidence and validation signals so later review does not depend only on chat history
+## Source Of Truth And Integrity
 
-This does not guarantee lower token usage in every agent session. It gives humans and coding agents a smaller, more structured starting point than ad hoc prompts or whole-repo context dumps.
+Human-owned task files are the authoritative inputs. Generated reports, projections, and worksets are managed outputs; do not edit them directly. If task intent changes, edit the source task files and follow `status` to regenerate anything stale.
 
-Further context-management improvements are planned, but the current implementation should be treated as a scoped-context workflow, not an automatic token optimizer.
+`ai-sdlc verify` checks Harness structure and protected-file hashes. `ai-sdlc validate --task <task-slug>` evaluates workflow consistency and recorded review-readiness signals. Neither command runs project tests or proves that an implementation is correct, secure, compliant, approved, or ready to release.
 
 ## Current Limits
 
 AI SDLC Harness does not:
 
-- call AI models
-- generate application code
-- generate tests
-- run tests
+- call AI models or generate application code
+- generate or run project tests
 - deeply inspect application code
-- scan for security issues
-- validate compliance
-- prove correctness
-- approve work
-- determine release readiness
-- enforce packs
-- install adapters
-- modify root `AGENTS.md` or `CLAUDE.md`
+- scan for vulnerabilities or validate compliance
+- prove correctness, approve work, or determine release readiness
+- enforce optional packs
 
-It supports human review, security review, testing, and CI/CD by making task context and recorded evidence easier to inspect.
+It gives humans and coding agents a smaller, current, inspectable workflow record; it does not replace engineering judgment or normal delivery controls.
 
 ## Learn More
 
 - [Quickstart](docs/quickstart.md)
-- [Harness Flow](docs/harness-flow.md)
-- [CLI Reference](docs/cli-reference.md)
+- [Core Concepts](docs/concepts.md)
 - [Security and Integrity](docs/security-and-integrity.md)
-- [Concepts](docs/concepts.md)
 - [Compatibility](docs/compatibility.md)
 - [Contributing](CONTRIBUTING.md)
-
-## Current Install Path
-
-The current supported install path is a source checkout with a local editable install:
-
-```bash
-python -m pip install -e ".[test]"
-```
-
-Package-registry publication is not part of the current implemented release surface.

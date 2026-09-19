@@ -2,11 +2,14 @@
 
 AI SDLC Harness is a repo-native control scaffold for AI-assisted software delivery. It records task boundaries, expectations, workset context, evidence, and review readiness signals as files in the repository.
 
-This guide describes the implemented workflow:
+After initialization and task creation, `status` resolves the current phase and routes the implemented workflow:
 
 ```text
-init -> task start -> preflight -> spec -> test-contract -> generate -> implement -> evidence -> validate -> status -> verify
+init -> task start -> preflight -> spec -> test-contract -> generate
+     -> implementation -> evidence -> validate -> review -> complete
 ```
+
+Run `status` between steps and follow its displayed command or human action. `verify` is an independent integrity check that can be run at any time.
 
 ## Task Model
 
@@ -56,7 +59,7 @@ Writes:
 - `.harness/packs/selected.yaml`
 - `.harness/tasks/`
 
-`init` is non-destructive by default. It creates the repo-local harness directory and records that no optional packs are selected by default. It does not install adapters and does not modify root `AGENTS.md` or `CLAUDE.md`.
+`init` is non-destructive by default. It creates the repo-local harness directory and records that no optional packs are selected by default. It does not install adapters and does not modify root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`.
 
 ### 2. Start A Task
 
@@ -126,7 +129,7 @@ Reads:
 
 - `acceptance.md`
 - `test-contract.md`
-- `verification.md`
+- `verification.md` for any results already recorded
 - basic repository test signals
 
 Writes:
@@ -134,7 +137,7 @@ Writes:
 - `.harness/tasks/<task-slug>/test-contract-review.md`
 - manifest entry and hash for the report
 
-This report checks whether existing task artifacts contain usable acceptance, test, and verification intent. It does not generate tests or run tests.
+This report checks whether the task has usable acceptance and planned test intent, together with any recorded verification results. Planned checks belong in `test-contract.md`; `verification.md` records checks actually run and observed results. The command does not generate tests or run tests.
 
 ### 6. Generate The Workset
 
@@ -156,15 +159,16 @@ Reads:
 Writes:
 
 - `.harness/tasks/<task-slug>/generated/agent-workset.md`
-- manifest entry and hash for the workset
+- `.harness/tasks/<task-slug>/generated/context-manifest.yaml`
+- manifest entries and hashes for the generated pair
 
-`agent-workset.md` is the task-scoped pre-implementation context package. Give it to a human implementer or coding agent before code changes begin. It compiles bounded excerpts, warnings, and completion evidence expectations. It does not generate code, generate tests, call AI models, run tests, install adapters, or enforce packs.
+`agent-workset.md` is the task-scoped pre-implementation context package. Give it to a human implementer or coding agent before code changes begin. It compiles bounded excerpts, warnings, and completion evidence expectations. `context-manifest.yaml` records the exact selection snapshot, budgets, hashes, findings, and workset linkage. The command does not generate code, generate tests, call AI models, run tests, install adapters, or enforce packs.
 
 ### 7. Implement
 
 Implementation happens outside the harness command flow. A human or coding agent changes the repository, uses the workset as context, and updates task artifacts as needed.
 
-Record what happened in:
+Keep planned checks in `test-contract.md`. Record what actually happened in:
 
 - `evidence.md`
 - `verification.md`
@@ -215,21 +219,21 @@ Writes:
 ### 10. Inspect Status
 
 ```bash
-ai-sdlc status
+ai-sdlc status --task <task-slug>
 ```
 
 Reads:
 
-- `.harness/` structure
-- manifest records
-- selected optional pack records
-- task/report/workset counts
+- task sources and generated artifacts
+- four Lineage freshness states
+- generated-handoff and validation currentness
+- manifest integrity
 
 Writes:
 
 - nothing
 
-`status` is read-only.
+`status` is the read-only workflow resolver. It derives the current phase, one outcome (`NEXT`, `REVIEW_REQUIRED`, `BLOCKED`, or `COMPLETE`), and the next valid command or human action. With multiple tasks, select one explicitly with `--task`; no active-task choice is persisted or guessed. `COMPLETE` means the Harness workflow record is complete, not that the implementation is correct, secure, compliant, approved, or ready to release.
 
 ### 11. Verify Integrity
 
@@ -271,7 +275,7 @@ The current harness does not:
 - approve work
 - determine release readiness
 - enforce packs
-- install adapters
-- modify root `AGENTS.md` or `CLAUDE.md`
+- install adapters implicitly
+- modify root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`
 
 Use the harness as a structured record and review aid. Human review, appropriate tests, security review, and release judgment remain outside the harness.

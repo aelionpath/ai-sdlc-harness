@@ -13,3 +13,5 @@ TODO: Record constraints that must be preserved, such as compatibility, supporte
 TODO: List behavior, files, workflows, or software areas that are out of scope.
 
 TODO: List existing behavior that must remain unchanged unless explicitly in scope.
+
+TODO: Record any security, privacy, authorization, sensitive-data, or safe-failure invariants that must remain true, or note not applicable.

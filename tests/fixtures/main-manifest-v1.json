@@ -1,0 +1,42 @@
+{
+  "generated_at": "2026-01-01T00:00:00+00:00",
+  "harness_version": "1.0.0",
+  "integrity": {
+    "manifest_self_hash": "excluded-in-phase-1",
+    "note": "Future releases should add signed release metadata and downloadable checksum verification.",
+    "release_verification": "deferred"
+  },
+  "managed_files": [
+    {
+      "hash_algorithm": "sha256",
+      "path": ".harness/config.yaml",
+      "protected": true,
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "hash_algorithm": "sha256",
+      "path": ".harness/state.json",
+      "protected": true,
+      "sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "hash_algorithm": null,
+      "path": ".harness/manifest.json",
+      "protected": true,
+      "sha256": null
+    },
+    {
+      "hash_algorithm": "sha256",
+      "path": ".harness/generated/agent-instructions.md",
+      "protected": true,
+      "sha256": "2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "hash_algorithm": "sha256",
+      "path": ".harness/packs/selected.yaml",
+      "protected": true,
+      "sha256": "3333333333333333333333333333333333333333333333333333333333333333"
+    }
+  ],
+  "template_version": "1.0.0"
+}

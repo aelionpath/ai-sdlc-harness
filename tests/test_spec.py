@@ -1,16 +1,25 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 
+import pytest
 import yaml
 
+from ai_sdlc_harness import spec as spec_module
 from ai_sdlc_harness.cli import main
+from ai_sdlc_harness.files import PathSafetyError
 from ai_sdlc_harness.init import init_project
+from ai_sdlc_harness.preflight import run_preflight
 from ai_sdlc_harness.spec import run_spec
 from ai_sdlc_harness.status import status_project
 from ai_sdlc_harness.task import start_task
 from ai_sdlc_harness.verify import verify_project
+from tests.lineage_test_helpers import (
+    install_released_v1_with_current_task_records,
+)
 
 
 TASK_FILES = [
@@ -57,6 +66,15 @@ def _start_sample_task(root: Path, title: str = "Spec me") -> str:
     assert init_project(root)[0] == 0
     assert start_task(root, title)[0] == 0
     return "spec-me"
+
+
+def _symlink_or_skip(link, target):
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        if os.environ.get("AI_SDLC_REQUIRE_REAL_SYMLINKS") == "1":
+            pytest.fail(f"real symlink creation is required but unavailable: {exc}", pytrace=False)
+        pytest.skip(f"symlink creation is unavailable: {exc}")
 
 
 def _fill_task_inputs(root: Path, slug: str) -> None:
@@ -332,7 +350,7 @@ def test_spec_creates_markdown_with_sections_findings_and_manifest_entry(project
         "## Coupling / Maintainability Notes",
         "## Security / Privacy Risk-Surface Notes",
         "## Test Expectations",
-        "## Verification Expectations",
+        "## Verification Record",
         "## Evidence Expectations",
         "## Open Questions",
         "## Preflight Signals",
@@ -403,6 +421,29 @@ def test_spec_creates_markdown_with_sections_findings_and_manifest_entry(project
     assert req_entry["protected"] is True
     assert req_entry["hash_algorithm"] == "sha256"
     assert req_entry["sha256"]
+    provenance = {
+        record["output_path"]: record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+    }
+    spec_record = provenance[f".harness/tasks/{slug}/spec.md"]
+    requirements_record = provenance[
+        f".harness/tasks/{slug}/requirements.yaml"
+    ]
+    assert spec_record["output_sha256"] == hashlib.sha256(
+        path.read_bytes()
+    ).hexdigest()
+    assert requirements_record["output_sha256"] == hashlib.sha256(
+        req_path.read_bytes()
+    ).hexdigest()
+    assert spec_record["dependencies"] == requirements_record["dependencies"]
+    assert f".harness/tasks/{slug}/requirements.yaml" not in {
+        item["dependency_path"] for item in spec_record["dependencies"]
+    }
+    assert f".harness/tasks/{slug}/spec.md" not in {
+        item["dependency_path"] for item in requirements_record["dependencies"]
+    }
+    assert spec_record["repository_observations"] == []
+    assert requirements_record["repository_observations"] == []
 
 
 def test_spec_records_weak_inputs_as_findings_without_command_failure(project_tmp):
@@ -526,6 +567,7 @@ def test_spec_skips_manifest_refresh_when_content_is_byte_identical(project_tmp,
     assert "skip unchanged file .harness/tasks/spec-me/requirements.yaml" in messages
     assert "skip existing manifest .harness/manifest.json" in messages
     assert (project_tmp / ".harness" / "manifest.json").read_bytes() == manifest_before
+    assert len(_manifest(project_tmp)["generated_artifact_provenance"]) == 2
 
 
 def test_spec_never_overwrites_unmanaged_existing_spec(project_tmp):
@@ -636,7 +678,7 @@ def test_spec_does_not_modify_inputs_agent_files_or_workset(project_tmp):
 
     assert code == 0
     assert {path: path.read_bytes() for path in tracked} == before
-    assert "root AGENTS.md and CLAUDE.md were not modified" in messages
+    assert "root AGENTS.md, CLAUDE.md, and GEMINI.md were not modified" in messages
     assert ".harness/generated/agent-instructions.md was not modified" in messages
     assert ".harness/tasks/spec-me/generated/agent-workset.md was not modified" in messages
 
@@ -719,3 +761,324 @@ def test_status_reports_manifest_managed_spec_count_and_remains_read_only(projec
     assert "manifest-managed spec reports: 1" in messages
     assert "manifest-managed requirements files: 1" in messages
     assert before == after
+
+
+def test_spec_failure_after_first_write_records_no_new_sibling_provenance(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_spec(project_tmp, slug)[0] == 0
+    acceptance = _task_path(project_tmp, slug, "acceptance.md")
+    acceptance.write_text(
+        acceptance.read_text(encoding="utf-8").replace(
+            "- Weak source artifacts become findings in spec.md.",
+            "- Weak source artifacts become findings in spec.md.\n"
+            "- Both sibling outputs change for this failure test.",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:01+00:00",
+    )
+    real_persist = spec_module.persist_exact_bytes
+    calls = 0
+
+    def fail_second(path, content):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_persist(path, content)
+        records = _manifest(project_tmp)["generated_artifact_provenance"]
+        sibling_paths = {
+            f".harness/tasks/{slug}/spec.md",
+            f".harness/tasks/{slug}/requirements.yaml",
+        }
+        assert not sibling_paths.intersection(
+            record["output_path"] for record in records
+        )
+        raise OSError("simulated second output failure")
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec.persist_exact_bytes",
+        fail_second,
+    )
+
+    code, messages = run_spec(project_tmp, slug)
+
+    assert code == 1
+    assert "simulated second output failure" in messages[0]
+    assert not _manifest(project_tmp)["generated_artifact_provenance"]
+
+
+def test_spec_invalidates_only_changed_sibling_before_writes(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_spec(project_tmp, slug)[0] == 0
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:01+00:00",
+    )
+
+    def fail_first(_path, _content):
+        records = {
+            record["output_path"]: record
+            for record in _manifest(project_tmp)[
+                "generated_artifact_provenance"
+            ]
+        }
+        assert f".harness/tasks/{slug}/spec.md" not in records
+        assert f".harness/tasks/{slug}/requirements.yaml" in records
+        raise OSError("simulated first output failure")
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec.persist_exact_bytes",
+        fail_first,
+    )
+
+    code, messages = run_spec(project_tmp, slug)
+
+    assert code == 1
+    assert "simulated first output failure" in messages[0]
+
+
+def test_successful_spec_migrates_v1_and_records_both_outputs(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    legacy = install_released_v1_with_current_task_records(project_tmp)
+    managed_before = {
+        record["path"]: record for record in legacy["managed_files"]
+    }
+
+    assert run_spec(project_tmp, slug)[0] == 0
+
+    migrated = _manifest(project_tmp)
+    assert migrated["manifest_schema_version"] == 2
+    after_managed = {
+        record["path"]: record for record in migrated["managed_files"]
+    }
+    for path, record in managed_before.items():
+        assert after_managed[path] == record
+    assert {
+        record["output_path"]
+        for record in migrated["generated_artifact_provenance"]
+    } == {
+        f".harness/tasks/{slug}/spec.md",
+        f".harness/tasks/{slug}/requirements.yaml",
+    }
+
+
+def test_spec_preserves_unrelated_preflight_provenance(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    assert run_preflight(project_tmp, slug)[0] == 0
+    preflight_path = f".harness/tasks/{slug}/preflight.md"
+    before = next(
+        record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+        if record["output_path"] == preflight_path
+    )
+
+    assert run_spec(project_tmp, slug)[0] == 0
+
+    after = next(
+        record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+        if record["output_path"] == preflight_path
+    )
+    assert after == before
+
+
+def test_spec_rendering_uses_the_exact_captured_acceptance_bytes(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    acceptance = _task_path(project_tmp, slug, "acceptance.md")
+    captured_bytes = acceptance.read_bytes()
+    real_capture = spec_module.capture_dependencies
+
+    def capture_then_change(root, expected):
+        captures = real_capture(root, expected)
+        acceptance.write_text(
+            "# Acceptance\n\n## Requirements And Acceptance Criteria\n\n"
+            "- Changed after capture.\n",
+            encoding="utf-8",
+        )
+        return captures
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec.capture_dependencies",
+        capture_then_change,
+    )
+
+    code, _messages = run_spec(project_tmp, slug)
+
+    assert code == 0
+    requirements = yaml.safe_load(
+        _requirements_path(project_tmp, slug).read_text(encoding="utf-8")
+    )
+    assert [
+        item["statement"] for item in requirements["requirements"]
+    ] == [
+        "spec.md is generated for the selected task.",
+        "Weak source artifacts become findings in spec.md.",
+    ]
+    records = {
+        record["output_path"]: record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+    }
+    dependency = next(
+        item
+        for item in records[f".harness/tasks/{slug}/spec.md"]["dependencies"]
+        if item["dependency_path"].endswith("/acceptance.md")
+    )
+    assert dependency["dependency_sha256"] == hashlib.sha256(
+        captured_bytes
+    ).hexdigest()
+
+
+def test_spec_rejects_symlinked_output_before_ownership_checks(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    target = project_tmp / "redirected-spec.md"
+    target.write_bytes(b"keep target")
+    output = _spec_path(project_tmp, slug)
+    _symlink_or_skip(output, target)
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    code, messages = run_spec(project_tmp, slug, force=True)
+
+    assert code == 1
+    assert "managed output path must not be a symlink" in messages[0]
+    assert output.is_symlink()
+    assert target.read_bytes() == b"keep target"
+    assert not _requirements_path(project_tmp, slug).exists()
+    assert manifest_path.read_bytes() == manifest_before
+
+
+def test_spec_checks_mocked_output_safety_before_capture(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    spec_output = _spec_path(project_tmp, slug)
+    requirements_output = _requirements_path(project_tmp, slug)
+    spec_output.write_bytes(b"keep spec")
+    requirements_output.write_bytes(b"keep requirements")
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    def reject_output(*_args, **_kwargs):
+        raise PathSafetyError("simulated unsafe managed output")
+
+    def fail_if_captured(*_args, **_kwargs):
+        pytest.fail("dependency capture ran after output safety failure")
+
+    monkeypatch.setattr(
+        spec_module,
+        "resolve_managed_output_under_root",
+        reject_output,
+    )
+    monkeypatch.setattr(
+        spec_module,
+        "capture_dependencies",
+        fail_if_captured,
+    )
+
+    code, messages = run_spec(project_tmp, slug, force=True)
+
+    assert code == 1
+    assert "simulated unsafe managed output" in messages[0]
+    assert manifest_path.read_bytes() == manifest_before
+    assert spec_output.read_bytes() == b"keep spec"
+    assert requirements_output.read_bytes() == b"keep requirements"
+
+
+def test_spec_final_manifest_failure_records_no_new_sibling_provenance(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_task_inputs(project_tmp, slug)
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_preflight(project_tmp, slug)[0] == 0
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_spec(project_tmp, slug)[0] == 0
+    spec_path_text = f".harness/tasks/{slug}/spec.md"
+    requirements_path_text = f".harness/tasks/{slug}/requirements.yaml"
+    old_hashes = {
+        path: _manifest_entry(project_tmp, path)["sha256"]
+        for path in (spec_path_text, requirements_path_text)
+    }
+    preflight_path = f".harness/tasks/{slug}/preflight.md"
+    unrelated_before = next(
+        record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+        if record["output_path"] == preflight_path
+    )
+    acceptance = _task_path(project_tmp, slug, "acceptance.md")
+    acceptance.write_text(
+        acceptance.read_text(encoding="utf-8").replace(
+            "- Weak source artifacts become findings in spec.md.",
+            "- Weak source artifacts become findings in spec.md.\n"
+            "- Both outputs change before final manifest failure.",
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:01+00:00",
+    )
+    real_persist = spec_module.persist_manifest_model
+    calls = 0
+
+    def fail_final(root, document):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_persist(root, document)
+        raise OSError("simulated spec final manifest failure")
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec.persist_manifest_model",
+        fail_final,
+    )
+
+    code, messages = run_spec(project_tmp, slug)
+
+    assert code == 1
+    assert "simulated spec final manifest failure" in messages[0]
+    manifest = _manifest(project_tmp)
+    records = {
+        record["output_path"]: record
+        for record in manifest["generated_artifact_provenance"]
+    }
+    assert spec_path_text not in records
+    assert requirements_path_text not in records
+    assert records[preflight_path] == unrelated_before
+    for path, old_hash in old_hashes.items():
+        assert _manifest_entry(project_tmp, path)["sha256"] == old_hash
+        target = project_tmp / Path(*path.split("/"))
+        assert hashlib.sha256(target.read_bytes()).hexdigest() != old_hash

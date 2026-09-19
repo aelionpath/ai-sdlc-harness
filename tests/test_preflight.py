@@ -1,13 +1,23 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 from pathlib import Path
 
+import pytest
+
+from ai_sdlc_harness import preflight as preflight_module
+from ai_sdlc_harness.files import PathSafetyError
 from ai_sdlc_harness.init import init_project
 from ai_sdlc_harness.preflight import run_preflight
+from ai_sdlc_harness.spec import run_spec
 from ai_sdlc_harness.status import status_project
 from ai_sdlc_harness.task import start_task
 from ai_sdlc_harness.verify import verify_project
+from tests.lineage_test_helpers import (
+    install_released_v1_with_current_task_records,
+)
 
 
 TASK_FILES = [
@@ -50,6 +60,15 @@ def _start_sample_task(root: Path, title: str = "Preflight me") -> str:
     assert init_project(root)[0] == 0
     assert start_task(root, title)[0] == 0
     return "preflight-me"
+
+
+def _symlink_or_skip(link, target):
+    try:
+        link.symlink_to(target)
+    except (NotImplementedError, OSError) as exc:
+        if os.environ.get("AI_SDLC_REQUIRE_REAL_SYMLINKS") == "1":
+            pytest.fail(f"real symlink creation is required but unavailable: {exc}", pytrace=False)
+        pytest.skip(f"symlink creation is unavailable: {exc}")
 
 
 def _fill_boundary_ready_task(root: Path, slug: str) -> None:
@@ -274,7 +293,7 @@ def test_preflight_creates_report_with_signals_packs_and_readiness(project_tmp):
     assert "warning: protected behavior and non-goals are todo only." in text
     assert "warning: security/privacy risk surface is unknown or still TODO." in text
     assert "warning: test intent is missing or still TODO." in text
-    assert "warning: verification command intent is missing or still TODO." in text
+    assert "warning: no verification commands or checks are recorded as run." in text
     assert "warning: no test framework detected." in text
     assert "warning: no CI detected." in text
     assert "info: preflight uses shallow section and marker-based checks only." in text
@@ -286,6 +305,37 @@ def test_preflight_creates_report_with_signals_packs_and_readiness(project_tmp):
     assert entry["protected"] is True
     assert entry["hash_algorithm"] == "sha256"
     assert entry["sha256"]
+    provenance = _manifest(project_tmp)["generated_artifact_provenance"]
+    assert len(provenance) == 1
+    record = provenance[0]
+    assert record["output_path"] == f".harness/tasks/{slug}/preflight.md"
+    assert record["output_sha256"] == hashlib.sha256(
+        report_path.read_bytes()
+    ).hexdigest()
+    assert [item["dependency_path"] for item in record["dependencies"]] == sorted(
+        [
+            *(f".harness/tasks/{slug}/{filename}" for filename in TASK_FILES),
+            ".harness/packs/selected.yaml",
+        ]
+    )
+    assert [
+        (item["observation_path"], item["predicate"])
+        for item in record["repository_observations"]
+    ] == sorted(
+        [
+            (".git", "exists"),
+            ("pyproject.toml", "is_file"),
+            ("package.json", "is_file"),
+            ("Cargo.toml", "is_file"),
+            ("go.mod", "is_file"),
+            ("pytest.ini", "is_file"),
+            ("AGENTS.md", "is_file"),
+            ("CLAUDE.md", "is_file"),
+            ("tests", "is_dir"),
+            (".github/workflows", "is_dir"),
+        ]
+    )
+    assert "generated_at" not in record
 
 
 def test_preflight_reports_no_boundary_blockers_when_key_sections_are_filled(project_tmp):
@@ -487,7 +537,7 @@ def test_verify_fails_when_manifest_managed_preflight_hash_drifts(project_tmp):
     assert any("hash drift detected for .harness/tasks/preflight-me/preflight.md" in message for message in messages)
 
 
-def test_status_reports_preflight_count_and_remains_read_only(project_tmp):
+def test_selected_task_status_omits_preflight_count_and_remains_read_only(project_tmp):
     slug = _start_sample_task(project_tmp)
     assert run_preflight(project_tmp, slug)[0] == 0
     tracked = [project_tmp / relative for relative in BASE_MANAGED_FILES]
@@ -499,5 +549,320 @@ def test_status_reports_preflight_count_and_remains_read_only(project_tmp):
     after = {path: path.read_bytes() for path in tracked}
 
     assert code == 0
-    assert "manifest-managed preflight reports: 1" in messages
+    assert f"task: {slug}" in messages
+    assert "manifest-managed preflight reports: 1" not in messages
     assert before == after
+
+
+def test_preflight_complete_noop_preserves_output_and_manifest_bytes(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_preflight(project_tmp, slug)[0] == 0
+    output_before = _preflight_path(project_tmp, slug).read_bytes()
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    code, messages = run_preflight(project_tmp, slug)
+
+    assert code == 0
+    assert messages.count(
+        f"skip unchanged file .harness/tasks/{slug}/preflight.md"
+    ) == 1
+    assert _preflight_path(project_tmp, slug).read_bytes() == output_before
+    assert manifest_path.read_bytes() == manifest_before
+    assert len(_manifest(project_tmp)["generated_artifact_provenance"]) == 1
+
+
+def test_preflight_changed_output_invalidates_before_failed_write(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_preflight(project_tmp, slug)[0] == 0
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight._timestamp",
+        lambda: "2026-07-29T00:00:01+00:00",
+    )
+
+    def fail_after_invalidation(_path, _content):
+        records = _manifest(project_tmp)["generated_artifact_provenance"]
+        assert not any(
+            record["output_path"].endswith("/preflight.md")
+            for record in records
+        )
+        raise OSError("simulated output failure")
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight.persist_exact_bytes",
+        fail_after_invalidation,
+    )
+
+    code, messages = run_preflight(project_tmp, slug)
+
+    assert code == 1
+    assert "simulated output failure" in messages[0]
+    assert not _manifest(project_tmp)["generated_artifact_provenance"]
+
+
+def test_successful_preflight_migrates_v1_and_preserves_managed_records(
+    project_tmp,
+):
+    slug = _start_sample_task(project_tmp)
+    legacy = install_released_v1_with_current_task_records(project_tmp)
+    managed_before = legacy["managed_files"]
+
+    assert run_preflight(project_tmp, slug)[0] == 0
+
+    migrated = _manifest(project_tmp)
+    assert migrated["manifest_schema_version"] == 2
+    before_by_path = {record["path"]: record for record in managed_before}
+    after_by_path = {record["path"]: record for record in migrated["managed_files"]}
+    for path, record in before_by_path.items():
+        assert after_by_path[path] == record
+    assert [
+        record["output_path"]
+        for record in migrated["generated_artifact_provenance"]
+    ] == [f".harness/tasks/{slug}/preflight.md"]
+
+
+def test_preflight_preserves_unrelated_spec_provenance(project_tmp):
+    slug = _start_sample_task(project_tmp)
+    assert run_spec(project_tmp, slug)[0] == 0
+    before = {
+        record["output_path"]: record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+    }
+
+    assert run_preflight(project_tmp, slug)[0] == 0
+
+    after = {
+        record["output_path"]: record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+    }
+    for path, record in before.items():
+        assert after[path] == record
+
+
+def test_preflight_rendering_uses_the_exact_captured_task_bytes(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_boundary_ready_task(project_tmp, slug)
+    task_path = _task_path(project_tmp, slug, "task.md")
+    captured_bytes = task_path.read_bytes()
+    real_capture = preflight_module.capture_dependencies
+
+    def capture_then_change(root, expected):
+        captures = real_capture(root, expected)
+        task_path.write_text(
+            "# Task\n\n## Implementation Boundary\n\nTODO\n",
+            encoding="utf-8",
+        )
+        return captures
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight.capture_dependencies",
+        capture_then_change,
+    )
+
+    code, _messages = run_preflight(project_tmp, slug)
+
+    assert code == 0
+    report = _preflight_path(project_tmp, slug).read_text(encoding="utf-8")
+    assert "- Implementation boundary: ready" in report
+    record = _manifest(project_tmp)["generated_artifact_provenance"][0]
+    dependency = next(
+        item
+        for item in record["dependencies"]
+        if item["dependency_path"].endswith("/task.md")
+    )
+    assert dependency["dependency_sha256"] == hashlib.sha256(
+        captured_bytes
+    ).hexdigest()
+
+
+def test_preflight_observation_change_aborts_before_writes(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+    real_snapshot = preflight_module.snapshot_repository_observations
+    calls = 0
+
+    def change_before_second_snapshot(root, expected):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            (project_tmp / "pyproject.toml").write_text(
+                "[project]\n",
+                encoding="utf-8",
+            )
+        return real_snapshot(root, expected)
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight.snapshot_repository_observations",
+        change_before_second_snapshot,
+    )
+
+    code, messages = run_preflight(project_tmp, slug)
+
+    assert code == 1
+    assert "Repository observations changed during preflight" in messages[0]
+    assert not _preflight_path(project_tmp, slug).exists()
+    assert manifest_path.read_bytes() == manifest_before
+
+
+def test_preflight_rejects_symlinked_output_before_ownership_checks(
+    project_tmp,
+):
+    slug = _start_sample_task(project_tmp)
+    target = project_tmp / "redirected-preflight.md"
+    target.write_bytes(b"keep target")
+    output = _preflight_path(project_tmp, slug)
+    _symlink_or_skip(output, target)
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    code, messages = run_preflight(project_tmp, slug, force=True)
+
+    assert code == 1
+    assert "managed output path must not be a symlink" in messages[0]
+    assert output.is_symlink()
+    assert target.read_bytes() == b"keep target"
+    assert manifest_path.read_bytes() == manifest_before
+
+
+def test_preflight_checks_mocked_output_safety_before_capture(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    output = _preflight_path(project_tmp, slug)
+    output.write_bytes(b"keep preflight")
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    def reject_output(*_args, **_kwargs):
+        raise PathSafetyError("simulated unsafe managed output")
+
+    def fail_if_captured(*_args, **_kwargs):
+        pytest.fail("dependency capture ran after output safety failure")
+
+    monkeypatch.setattr(
+        preflight_module,
+        "resolve_managed_output_under_root",
+        reject_output,
+    )
+    monkeypatch.setattr(
+        preflight_module,
+        "capture_dependencies",
+        fail_if_captured,
+    )
+
+    code, messages = run_preflight(project_tmp, slug, force=True)
+
+    assert code == 1
+    assert "simulated unsafe managed output" in messages[0]
+    assert manifest_path.read_bytes() == manifest_before
+    assert output.read_bytes() == b"keep preflight"
+
+
+def test_preflight_final_manifest_failure_leaves_old_provenance_absent(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    monkeypatch.setattr(
+        "ai_sdlc_harness.spec._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_spec(project_tmp, slug)[0] == 0
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight._timestamp",
+        lambda: "2026-07-29T00:00:00+00:00",
+    )
+    assert run_preflight(project_tmp, slug)[0] == 0
+    path_text = f".harness/tasks/{slug}/preflight.md"
+    old_managed_hash = _manifest_entry(project_tmp, path_text)["sha256"]
+    unrelated_before = {
+        record["output_path"]: record
+        for record in _manifest(project_tmp)["generated_artifact_provenance"]
+        if record["output_path"] != path_text
+    }
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight._timestamp",
+        lambda: "2026-07-29T00:00:01+00:00",
+    )
+    real_persist = preflight_module.persist_manifest_model
+    calls = 0
+
+    def fail_final(root, document):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return real_persist(root, document)
+        raise OSError("simulated final manifest failure")
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight.persist_manifest_model",
+        fail_final,
+    )
+
+    code, messages = run_preflight(project_tmp, slug)
+
+    assert code == 1
+    assert "simulated final manifest failure" in messages[0]
+    manifest = _manifest(project_tmp)
+    assert not any(
+        record["output_path"] == path_text
+        for record in manifest["generated_artifact_provenance"]
+    )
+    assert {
+        record["output_path"]: record
+        for record in manifest["generated_artifact_provenance"]
+    } == unrelated_before
+    assert _manifest_entry(project_tmp, path_text)["sha256"] == old_managed_hash
+    assert hashlib.sha256(
+        _preflight_path(project_tmp, slug).read_bytes()
+    ).hexdigest() != old_managed_hash
+
+
+def test_v1_final_manifest_failure_does_not_migrate_or_record_provenance(
+    project_tmp,
+    monkeypatch,
+):
+    slug = _start_sample_task(project_tmp)
+    install_released_v1_with_current_task_records(project_tmp)
+    manifest_path = project_tmp / ".harness" / "manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    def fail_final(_root, _document):
+        raise OSError("simulated v1 final manifest failure")
+
+    monkeypatch.setattr(
+        "ai_sdlc_harness.preflight.persist_manifest_model",
+        fail_final,
+    )
+
+    code, messages = run_preflight(project_tmp, slug)
+
+    assert code == 1
+    assert "simulated v1 final manifest failure" in messages[0]
+    assert _preflight_path(project_tmp, slug).is_file()
+    assert manifest_path.read_bytes() == manifest_before
+    manifest = _manifest(project_tmp)
+    assert "manifest_schema_version" not in manifest
+    assert "generated_artifact_provenance" not in manifest

@@ -19,10 +19,21 @@ from .constants import (
     TEST_CONTRACT_REVIEW_FILENAME,
     VALIDATION_REPORT_FILENAME,
 )
-from .detect import detect_project_signals
-from .files import relative_display_path
 from .manifest import load_manifest
 from .redact import redact_value
+from .workflow import (
+    LINEAGE_KEYS,
+    WorkflowActionKind,
+    WorkflowArtifactState,
+    WorkflowFinding,
+    WorkflowPhase,
+    WorkflowResolutionError,
+    WorkflowState,
+    resolve_workflow_state,
+)
+
+
+WORKFLOW_STATUS_SCHEMA_VERSION = 1
 
 
 def _load_yaml(path: Path) -> Any:
@@ -30,141 +41,277 @@ def _load_yaml(path: Path) -> Any:
         return yaml.safe_load(file_obj)
 
 
-def _load_json(path: Path) -> Any:
-    with path.open("r", encoding="utf-8") as file_obj:
-        return json.load(file_obj)
+def _manifest_counts(root: Path) -> dict[str, int]:
+    labels = {
+        "preflight": 0,
+        "spec": 0,
+        "requirements": 0,
+        "test_contract_review": 0,
+        "generated_workset": 0,
+        "evidence_report": 0,
+        "validation_report": 0,
+    }
+    manifest_path = root / HARNESS_DIR / "manifest.json"
+    if not manifest_path.is_file():
+        return labels
+    try:
+        entries = load_manifest(manifest_path).get("managed_files", [])
+    except (OSError, ValueError, UnicodeError):
+        return labels
+    if not isinstance(entries, list):
+        return labels
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        path = PurePosixPath(str(entry.get("path", "")).replace("\\", "/"))
+        direct = len(path.parts) == 4 and path.parts[:2] == (".harness", "tasks")
+        generated = (
+            len(path.parts) == 5
+            and path.parts[:2] == (".harness", "tasks")
+            and path.parts[3] == TASK_GENERATED_DIRNAME
+        )
+        if direct and path.name == PREFLIGHT_FILENAME:
+            labels["preflight"] += 1
+        elif direct and path.name == SPEC_FILENAME:
+            labels["spec"] += 1
+        elif direct and path.name == REQUIREMENTS_FILENAME:
+            labels["requirements"] += 1
+        elif direct and path.name == TEST_CONTRACT_REVIEW_FILENAME:
+            labels["test_contract_review"] += 1
+        elif generated and path.name == AGENT_WORKSET_FILENAME:
+            labels["generated_workset"] += 1
+        elif direct and path.name == EVIDENCE_REPORT_FILENAME:
+            labels["evidence_report"] += 1
+        elif direct and path.name == VALIDATION_REPORT_FILENAME:
+            labels["validation_report"] += 1
+    return labels
 
 
-def status_project(root: Path) -> tuple[int, list[str]]:
-    harness_root = root / HARNESS_DIR
-    config_path = harness_root / "config.yaml"
-    state_path = harness_root / "state.json"
-    manifest_path = harness_root / "manifest.json"
-    selected_path = harness_root / "packs" / "selected.yaml"
-    generated_path = harness_root / "generated" / "agent-instructions.md"
-    tasks_path = harness_root / "tasks"
+def _legacy_summary(root: Path, state: WorkflowState) -> list[str]:
+    """Retain small, established status facts without overwhelming navigation."""
 
-    messages = ["AI SDLC Harness status"]
-    messages.append(f"initialized: {'yes' if harness_root.is_dir() else 'no'}")
-    messages.append(f"config: {'present' if config_path.is_file() else 'missing'}")
-    messages.append(f"state: {'present' if state_path.is_file() else 'missing'}")
-    messages.append(f"manifest: {'present' if manifest_path.is_file() else 'missing'}")
-    messages.append(f"generated instructions: {'present' if generated_path.is_file() else 'missing'}")
-    if harness_root.is_dir():
-        task_count = sum(1 for path in tasks_path.iterdir() if path.is_dir()) if tasks_path.is_dir() else 0
-        messages.append(f"task folders: {task_count}")
-
-    config: dict[str, Any] = {}
-    if config_path.is_file():
+    if not state.initialized:
+        return []
+    if state.selected_task is not None:
+        return []
+    messages = [f"task folders: {len(state.available_tasks)}"]
+    config_path = root / HARNESS_DIR / "config.yaml"
+    if state.selected_task is None and config_path.is_file():
         try:
             loaded = _load_yaml(config_path)
-            if isinstance(loaded, dict):
-                config = redact_value(loaded)
-            if config.get("adoption_scope"):
-                messages.append(f"adoption scope: {config['adoption_scope']}")
-            messages.append(f"selected packs: {', '.join(config.get('selected_packs', [])) or 'none'}")
+            config = redact_value(loaded) if isinstance(loaded, dict) else {}
+            messages.append(
+                f"selected packs: {', '.join(config.get('selected_packs', [])) or 'none'}"
+            )
             adapters = config.get("adapters", {})
             if isinstance(adapters, dict):
-                adapter_text = ", ".join(f"{key}={value}" for key, value in adapters.items())
+                adapter_text = ", ".join(
+                    f"{key}={value}" for key, value in adapters.items()
+                )
                 messages.append(f"adapters: {adapter_text or 'none'}")
-            project = config.get("project", {})
-            if isinstance(project, dict):
-                languages = project.get("detected_languages", [])
-                tests = project.get("detected_test_frameworks", [])
-                ci = project.get("detected_ci", [])
-                messages.append(f"detected languages: {', '.join(languages) or 'none'}")
-                messages.append(f"detected tests: {', '.join(tests) or 'none'}")
-                messages.append(f"detected ci: {', '.join(ci) or 'none'}")
-        except Exception as exc:  # pragma: no cover - exercised by verify in detail
-            messages.append(f"config read error: {exc}")
+        except (OSError, TypeError, ValueError, UnicodeError, yaml.YAMLError):
+            messages.append("config: unreadable")
 
-    if selected_path.is_file():
-        messages.append(f"selected packs file: {relative_display_path(selected_path, root)}")
+    counts = _manifest_counts(root)
+    count_labels = (
+        ("preflight", "manifest-managed preflight reports"),
+        ("spec", "manifest-managed spec reports"),
+        ("requirements", "manifest-managed requirements files"),
+        ("test_contract_review", "manifest-managed test-contract review reports"),
+        ("generated_workset", "manifest-managed generated worksets"),
+        ("evidence_report", "manifest-managed evidence reports"),
+        ("validation_report", "manifest-managed validation reports"),
+    )
+    messages.extend(
+        f"{label}: {counts[key]}"
+        for key, label in count_labels
+        if counts[key]
+    )
+    return messages
 
-    if manifest_path.is_file():
-        try:
-            manifest = load_manifest(manifest_path)
-            entries = manifest.get("managed_files", [])
-            preflight_count = 0
-            spec_count = 0
-            requirements_count = 0
-            test_contract_review_count = 0
-            generated_workset_count = 0
-            evidence_report_count = 0
-            validation_report_count = 0
-            if isinstance(entries, list):
-                for entry in entries:
-                    if not isinstance(entry, dict):
-                        continue
-                    path = PurePosixPath(str(entry.get("path", "")).replace("\\", "/"))
-                    is_preflight = (
-                        len(path.parts) == 4
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.name == PREFLIGHT_FILENAME
-                    )
-                    if is_preflight:
-                        preflight_count += 1
-                    is_spec = (
-                        len(path.parts) == 4
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.name == SPEC_FILENAME
-                    )
-                    if is_spec:
-                        spec_count += 1
-                    is_requirements = (
-                        len(path.parts) == 4
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.name == REQUIREMENTS_FILENAME
-                    )
-                    if is_requirements:
-                        requirements_count += 1
-                    is_test_contract_review = (
-                        len(path.parts) == 4
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.name == TEST_CONTRACT_REVIEW_FILENAME
-                    )
-                    if is_test_contract_review:
-                        test_contract_review_count += 1
-                    is_generated_workset = (
-                        len(path.parts) == 5
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.parts[3] == TASK_GENERATED_DIRNAME
-                        and path.name == AGENT_WORKSET_FILENAME
-                    )
-                    if is_generated_workset:
-                        generated_workset_count += 1
-                    is_evidence_report = (
-                        len(path.parts) == 4
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.name == EVIDENCE_REPORT_FILENAME
-                    )
-                    if is_evidence_report:
-                        evidence_report_count += 1
-                    is_validation_report = (
-                        len(path.parts) == 4
-                        and path.parts[0] == ".harness"
-                        and path.parts[1] == "tasks"
-                        and path.name == VALIDATION_REPORT_FILENAME
-                    )
-                    if is_validation_report:
-                        validation_report_count += 1
-            messages.append(f"manifest-managed preflight reports: {preflight_count}")
-            messages.append(f"manifest-managed spec reports: {spec_count}")
-            messages.append(f"manifest-managed requirements files: {requirements_count}")
-            messages.append(f"manifest-managed test-contract review reports: {test_contract_review_count}")
-            messages.append(f"manifest-managed generated worksets: {generated_workset_count}")
-            messages.append(f"manifest-managed evidence reports: {evidence_report_count}")
-            messages.append(f"manifest-managed validation reports: {validation_report_count}")
-        except Exception as exc:  # pragma: no cover - verify reports manifest detail
-            messages.append(f"manifest read error: {exc}")
 
-    current_signals = detect_project_signals(root)
-    messages.append(f"AGENTS.md: {'present' if current_signals['files']['AGENTS.md'] else 'missing'}")
-    messages.append(f"CLAUDE.md: {'present' if current_signals['files']['CLAUDE.md'] else 'missing'}")
-    return 0, messages
+def _lineage_text(state: WorkflowState, *keys: str) -> str:
+    values = [state.lineage_freshness[key] for key in keys]
+    if all(value is values[0] for value in values):
+        value = values[0]
+        return value.value if value is not None else "not inspected"
+    return ", ".join(
+        f"{key}={value.value if value is not None else 'not inspected'}"
+        for key, value in zip(keys, values, strict=True)
+    )
+
+
+def _render_findings(findings: tuple[WorkflowFinding, ...]) -> list[str]:
+    if not findings:
+        return []
+    lines = ["", "findings:"]
+    lines.extend(f"  {finding.level.value}: {finding.message}" for finding in findings)
+    return lines
+
+
+def render_workflow_status(state: WorkflowState) -> list[str]:
+    """Render compact, developer-first status text."""
+
+    messages = ["AI SDLC Harness", f"initialized: {'yes' if state.initialized else 'no'}"]
+    if state.selected_task is not None:
+        messages.extend(
+            (
+                f"task: {state.selected_task}",
+                f"phase: {state.phase.value}",
+                f"outcome: {state.outcome.value}",
+            )
+        )
+    elif state.available_tasks:
+        messages.extend(
+            (
+                f"tasks: {', '.join(state.available_tasks)}",
+                f"outcome: {state.outcome.value}",
+            )
+        )
+    else:
+        messages.append(f"outcome: {state.outcome.value}")
+
+    if state.selected_task is not None and state.integrity_clean is not False:
+        messages.extend(
+            (
+                "",
+                "current:",
+                f"  preflight: {_lineage_text(state, 'preflight')}",
+                f"  specification: {_lineage_text(state, 'spec', 'requirements_projection')}",
+                f"  test contract: {_lineage_text(state, 'test_contract_review')}",
+            )
+        )
+        if state.validation_currentness is not None:
+            validation = state.validation_currentness.value
+            if state.validation_clean:
+                validation += " and CLEAN"
+            messages.append(f"  validation: {validation}")
+        if state.integrity_clean is True:
+            messages.append("  repository integrity: clean")
+
+    if state.phase is WorkflowPhase.IMPLEMENTATION and state.selected_task:
+        messages.extend(
+            (
+                "",
+                "handoff:",
+                f"  .harness/tasks/{state.selected_task}/generated/{AGENT_WORKSET_FILENAME}",
+            )
+        )
+
+    messages.extend(_render_findings(state.findings))
+    if state.next_actions:
+        messages.extend(("", "next:"))
+        for action in state.next_actions:
+            if action.kind is WorkflowActionKind.COMMAND:
+                messages.append(f"  {action.command}")
+            else:
+                messages.append(f"  {action.text}")
+    return messages
+
+
+def _artifact_value(value: WorkflowArtifactState | None) -> str | None:
+    return value.value if value is not None else None
+
+
+def workflow_status_document(state: WorkflowState) -> dict[str, Any]:
+    """Return the bounded deterministic adapter-facing status document."""
+
+    return {
+        "workflow_status_schema_version": WORKFLOW_STATUS_SCHEMA_VERSION,
+        "initialized": state.initialized,
+        "available_tasks": list(state.available_tasks),
+        "selected_task": state.selected_task,
+        "phase": state.phase.value,
+        "outcome": state.outcome.value,
+        "next_actions": [
+            {
+                "kind": action.kind.value,
+                "text": action.text,
+                "command": action.command,
+            }
+            for action in state.next_actions
+        ],
+        "lineage": {
+            key: (
+                state.lineage_freshness[key].value
+                if state.lineage_freshness[key] is not None
+                else None
+            )
+            for key in LINEAGE_KEYS
+        },
+        "generated_handoff": {
+            AGENT_WORKSET_FILENAME: _artifact_value(state.generated_workset),
+            "context-manifest.yaml": _artifact_value(state.context_manifest),
+        },
+        "evidence_report_status": _artifact_value(state.evidence_report),
+        "validation_currentness": (
+            state.validation_currentness.value
+            if state.validation_currentness is not None
+            else None
+        ),
+        "validation_clean": state.validation_clean,
+        "validation_blocker_count": state.validation_blocker_count,
+        "validation_warning_count": state.validation_warning_count,
+        "integrity_clean": state.integrity_clean,
+        "findings": [
+            {
+                "code": finding.code,
+                "level": finding.level.value,
+                "path": finding.path,
+                "message": finding.message,
+            }
+            for finding in state.findings
+        ],
+    }
+
+
+def render_workflow_json(state: WorkflowState) -> str:
+    return json.dumps(
+        workflow_status_document(state),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _error_json(error: WorkflowResolutionError) -> str:
+    return json.dumps(
+        {
+            "workflow_status_schema_version": WORKFLOW_STATUS_SCHEMA_VERSION,
+            "error": {"code": error.code, "message": error.message},
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def status_project(
+    root: Path,
+    task_slug: str | None = None,
+    *,
+    json_output: bool = False,
+) -> tuple[int, list[str]]:
+    """Resolve and render status without modifying repository state."""
+
+    try:
+        state = resolve_workflow_state(root, task_slug)
+    except WorkflowResolutionError as exc:
+        if json_output:
+            return 2, [_error_json(exc)]
+        return 2, ["AI SDLC Harness", f"error: {exc.message}"]
+
+    if json_output:
+        return 0, [render_workflow_json(state)]
+    rendered = render_workflow_status(state)
+    legacy = _legacy_summary(root, state)
+    if not legacy:
+        return 0, rendered
+    next_index = rendered.index("next:") - 1 if "next:" in rendered else len(rendered)
+    return 0, [
+        *rendered[:next_index],
+        "",
+        "details:",
+        *legacy,
+        *rendered[next_index:],
+    ]

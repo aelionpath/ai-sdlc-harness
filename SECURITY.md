@@ -2,13 +2,14 @@
 
 AI SDLC Harness is a local, artifact-driven workflow for recording task boundaries, generated worksets, evidence notes, review readiness signals, and manifest-managed file integrity.
 
-Please report suspected vulnerabilities privately to the project maintainer. Do not include secrets, customer data, or exploit details in public issues.
+Please report suspected vulnerabilities through [GitHub Private Vulnerability Reporting](https://github.com/aelionpath/ai-sdlc-harness/security/advisories/new). Do not include secrets, customer data, vulnerability details, or exploit details in public issues.
 
 Current security posture:
 
-- Managed writes are restricted to `.harness/`.
+- Workflow artifacts are managed under `.harness/`; explicit adapter installation writes only the supported repository-scoped `SKILL.md` paths.
 - Absolute managed-output paths and traversal paths are rejected.
-- Existing `AGENTS.md` and `CLAUDE.md` files are not modified.
+- Existing root `AGENTS.md`, `CLAUDE.md`, and `GEMINI.md` files are not modified.
+- Existing unmanaged adapter files are not adopted or overwritten.
 - CLI output redacts obvious secret-like values.
 - The CLI does not run project commands, scanners, tests, or CI automatically.
 
