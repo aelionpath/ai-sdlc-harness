@@ -62,19 +62,21 @@ description: Use this skill for coding, implementation, refactoring, debugging, 
 
 Use this thin bridge only for Harness-governed work in an initialized repository.
 
+You execute the engineering work. Harness is the deterministic control layer and workflow record; the user retains authority. Harness does not invoke or orchestrate you.
+
 ## Start from structured status
 
 - Run `ai-sdlc status --json` at the beginning. If the task slug is already known, run `ai-sdlc status --task <slug> --json`.
 - Do not infer the workflow phase from file existence or parse the human status output when structured status is available.
 - If multiple tasks leave `selected_task` empty, do not guess or persist a hidden choice. Ask the user which task to use, then rerun status with `--task <slug> --json`.
-- Follow `phase`, `outcome`, `next_actions`, the four-key `lineage` state, and validation state. Do not bypass `BLOCKED`, `REVIEW_REQUIRED`, or any human-review boundary.
-- For `NEXT`, you may run a deterministic Harness producer command in `next_actions` for the selected task unless that contradicts the user's instructions. After a state-changing Harness command, rerun structured status. Never fabricate a successful next state.
+- Use `phase`, `outcome`, `next_actions`, the four-key `lineage` state, and validation state as the workflow navigator. For `NEXT`, you may run a deterministic Harness producer command in `next_actions` for the selected task unless that contradicts the user's instructions. After a state-changing Harness command, rerun structured status. Continue through routine safe, bounded work rather than stopping after every Harness command. Never fabricate a successful next state.
+- Stop and ask the user when a real authority or approval decision is required, required information is unavailable, scope or intent is consequentially ambiguous, Harness reports `BLOCKED`, or progress would require changing authoritative intent merely to unblock yourself. Do not bypass `REVIEW_REQUIRED`; you may prepare supporting material, but never accept or approve for the user.
 
 ## Use the implementation handoff
 
 When status reaches implementation, read `.harness/tasks/<slug>/generated/agent-workset.md` as the bounded workflow handoff. Load repository code and files as needed, but do not recursively load the whole `.harness` tree.
 
-Human-owned task source artifacts are the authoritative workflow inputs. Do not invent missing requirements or accept human review for the user. Follow the baseline secure-engineering guardrails in the workset. Generated Harness outputs are not direct-edit surfaces. Never directly edit `preflight.md`, `spec.md`, `requirements.yaml`, `test-contract-review.md`, `generated/agent-workset.md`, `generated/context-manifest.yaml`, `evidence-report.md`, or `validation-report.md`; use the corresponding `ai-sdlc` producer command.
+Human-owned task source artifacts are the authoritative workflow inputs. You may assist with them within the user's stated intent; human-owned does not mean human-authored-only. Do not invent missing requirements, redefine intent, or accept human review for the user. Follow the baseline secure-engineering guardrails in the workset. Generated Harness outputs are not direct-edit surfaces. Never directly edit `preflight.md`, `spec.md`, `requirements.yaml`, `test-contract-review.md`, `generated/agent-workset.md`, `generated/context-manifest.yaml`, `evidence-report.md`, or `validation-report.md`; use the corresponding `ai-sdlc` producer command.
 
 Do not directly edit Harness control-plane files such as `.harness/config.yaml`, `.harness/state.json`, `.harness/manifest.json`, `.harness/generated/agent-instructions.md`, or `.harness/packs/selected.yaml`.
 
@@ -82,7 +84,7 @@ Do not directly edit Harness control-plane files such as `.harness/config.yaml`,
 
 After code, test, or configuration changes, record only factual implementation evidence in `evidence.md`. Record actual verification commands and observed results in `verification.md`. Never claim a command ran when it did not, and do not treat clean Harness validation as proof of correctness, security, or compliance.
 
-Rerun structured status and follow its deterministic next action. If status reports `COMPLETE`, stop Harness workflow automation, report that the Harness workflow state is complete, and preserve explicit human review and normal delivery boundaries. `COMPLETE` is not proof of correctness, security, or compliance.
+Rerun structured status and continue the bounded loop until a stop condition above applies. If status reports `COMPLETE`, stop Harness workflow automation, report that the Harness workflow record is complete, and preserve explicit human review and normal delivery boundaries. `COMPLETE` is not proof of correctness, security, compliance, approval, or release readiness.
 """
 
 

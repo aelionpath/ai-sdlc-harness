@@ -188,6 +188,55 @@ def test_public_installation_guidance_separates_users_from_contributors():
         assert "Package-registry publication is not part" not in public_guide
 
 
+def test_public_guidance_explains_the_agent_harness_and_developer_roles():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    quickstart = (ROOT / "docs/quickstart.md").read_text(encoding="utf-8")
+    concepts = (ROOT / "docs/concepts.md").read_text(encoding="utf-8")
+    flow = (ROOT / "docs/harness-flow.md").read_text(encoding="utf-8")
+    cli_reference = (ROOT / "docs/cli-reference.md").read_text(encoding="utf-8")
+
+    assert "The coding agent does the work. Harness constrains, guides, and records the workflow." in readme
+    assert "Coding agent = executor" in readme
+    assert "Developer = authority" in readme
+    assert "without asking for approval after every command" in readme
+
+    assert "Work on task add-request-timeout-handling using the AI SDLC Harness workflow." in quickstart
+    assert "Routine `NEXT` steps do not each require separate human approval." in quickstart
+    assert "The coding agent performs the engineering work" in quickstart
+
+    assert "## Roles And Authority" in concepts
+    assert "human must manually author every artifact" in concepts
+    assert "does not call, launch, or orchestrate the agent" in flow
+    assert "The coding agent, not Harness, performs those actions" in cli_reference
+
+
+def test_public_documentation_images_are_approved_and_resolve():
+    expected = {
+        ("README.md", "docs/images/give-the-task-once.png"),
+        ("docs/concepts.md", "images/what-harness-does.png"),
+        ("docs/concepts.md", "images/bounded-context.png"),
+        ("docs/concepts.md", "images/evidence-as-you-build.png"),
+    }
+    actual: set[tuple[str, str]] = set()
+    combined_text: list[str] = []
+
+    for relative in ("README.md", "docs/concepts.md"):
+        document = ROOT / relative
+        text = document.read_text(encoding="utf-8")
+        combined_text.append(text.lower())
+        for match in re.finditer(r"!\[[^\]]+\]\(([^)]+\.png)\)", text):
+            reference = match.group(1)
+            assert "\\" not in reference
+            assert not re.match(r"^[A-Za-z]:", reference)
+            assert (document.parent / reference).resolve().is_file()
+            actual.add((relative, reference))
+
+    assert actual == expected
+    all_text = "\n".join(combined_text)
+    assert "from idea to impact" not in all_text
+    assert "what is authoritative?" not in all_text
+
+
 def test_public_security_guidance_uses_private_vulnerability_reporting():
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 

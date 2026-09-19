@@ -2,7 +2,21 @@
 
 AI SDLC Harness is a repo-local workflow for bounded, reviewable AI-assisted software changes. It turns a rough request into explicit task artifacts, a task-scoped implementation handoff, factual evidence, and deterministic workflow status that humans and coding agents can follow.
 
+The coding agent does the work. Harness constrains, guides, and records the workflow. The developer remains the authority over intent, consequential decisions, and acceptance.
+
+```text
+Coding agent = executor
+Harness = control layer
+Developer = authority
+```
+
 The Harness does not call an AI model or implement the task. It supplies the control layer around that work: scope, acceptance criteria, test intent, current generated context, integrity checks, and visible human-review boundaries.
+
+With a repository Agent Skill installed, a coding agent can use Harness status as its workflow navigator, work from the current bounded handoff, record factual evidence and verification, and continue through routine safe steps without asking for approval after every command. It should stop when a real human decision is required, necessary information is unavailable, scope or intent is consequentially ambiguous, or Harness reports a blocking condition.
+
+In the diagram, “autonomously” means this bounded, status-guided continuation, not guaranteed uninterrupted completion. Harness does not invoke or orchestrate the agent.
+
+![Developer defines intent, Harness prepares bounded work, the coding agent executes, and the developer reviews structured results](docs/images/give-the-task-once.png)
 
 ## What It Provides
 
@@ -34,7 +48,7 @@ ai-sdlc task start "Add request timeout handling"
 ai-sdlc status --task add-request-timeout-handling
 ```
 
-Edit the new human-owned files under `.harness/tasks/add-request-timeout-handling/`, especially `task.md`, `acceptance.md`, and `test-contract.md`. Rerun `status` and follow the command or human action shown under `next:`. The Harness will route the task through readiness, specification, test-contract review, implementation handoff, evidence, validation, and final human review.
+Edit the new human-owned files under `.harness/tasks/add-request-timeout-handling/`, especially `task.md`, `acceptance.md`, and `test-contract.md`. A coding agent may help draft these files within the developer's stated intent; human-owned means the developer retains authority, not that every line must be typed manually. Rerun `status` and follow the command or human action shown under `next:`. The Harness routes the recorded workflow through readiness, specification, test-contract review, implementation handoff, evidence, validation, and final human review; it does not launch or orchestrate the agent.
 
 When the phase reaches `implementation`, use:
 
@@ -80,7 +94,8 @@ Human-owned task files are the authoritative inputs. Generated reports, projecti
 
 AI SDLC Harness does not:
 
-- call AI models or generate application code
+- call AI models or launch or orchestrate coding agents
+- run continuously in the background or implement application code
 - generate or run project tests
 - deeply inspect application code
 - scan for vulnerabilities or validate compliance

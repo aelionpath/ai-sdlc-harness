@@ -4,6 +4,18 @@ AI SDLC Harness is a repo-local control layer for bounded AI-assisted software w
 
 For a command-by-command walkthrough, see the [Quickstart](quickstart.md).
 
+## Roles And Authority
+
+The operating model has three distinct roles:
+
+1. **Developer / human** — owns intent and authority, supplies or approves decisions that cannot be delegated, and reviews consequential outcomes.
+2. **Coding agent** — executes the engineering work, consults Harness task state and status, performs bounded implementation and verification, and records evidence. It may assist with or draft authoritative task files, but it must not invent missing requirements, approve for the developer, or redefine intent merely to unblock itself.
+3. **Harness** — is the deterministic repo-local control layer. It validates state, currentness, and integrity; exposes next actions and boundaries; and records workflow state. It does not reason about the task, implement application code, call an AI model, launch an agent, or approve an outcome.
+
+In short: coding agent = executor, Harness = control layer, developer = authority. “Human-owned” means that authority stays with the developer; it does not mean a human must manually author every artifact or approve every routine workflow transition.
+
+![Human intent passes through Harness controls to bounded agent implementation and structured workflow output](images/what-harness-does.png)
+
 ## Artifact Model
 
 | Kind | Examples | Rule |
@@ -13,7 +25,7 @@ For a command-by-command walkthrough, see the [Quickstart](quickstart.md).
 | Generated review outputs | `evidence-report.md`, `validation-report.md` | Do not edit directly; update source evidence or verification and regenerate. |
 | Harness control-plane files | `.harness/config.yaml`, `.harness/state.json`, `.harness/manifest.json` | Managed by the Harness; do not hand-edit. |
 
-Human-owned task sources are authoritative inputs. Generated artifacts summarize, project, review, or package those inputs. In particular, `requirements.yaml` is an advisory structured projection, not the source of requirements.
+Human-owned task sources are authoritative inputs. A coding agent may draft or update them within the developer's stated intent, but ownership and decision authority remain human. Generated artifacts summarize, project, review, or package those inputs. In particular, `requirements.yaml` is an advisory structured projection, not the source of requirements.
 
 ## Task
 
@@ -58,11 +70,17 @@ Lineage is closed and producer-specific: each output observes only its declared 
 
 The workset reduces dependence on broad prompts and stale chat history, but it is not an automatic token guarantee and does not replace task-relevant code inspection.
 
+![Repository context is narrowed to a task-specific workset before the coding agent implements focused changes](images/bounded-context.png)
+
 ## Evidence And Verification
 
 `evidence.md` records what changed and why. `verification.md` records checks actually run and their observed results. These are human-owned factual sources.
 
 `ai-sdlc evidence` generates `evidence-report.md` from that record. The report can identify missing or weak evidence, but it does not run tests or establish that a claim is true.
+
+Evidence is not captured automatically: the coding agent or developer records factual sources as work proceeds, and Harness turns those records into review-readiness signals.
+
+![Intent, context, decisions, checks, change metadata, and review evidence are recorded during implementation](images/evidence-as-you-build.png)
 
 ## Validation Currentness
 
@@ -78,7 +96,7 @@ Human-owned task source content remains editable; generated and control-plane fi
 
 ## Agent Adapters
 
-An adapter is a thin repository Agent Skill for Codex, Claude Code, or Gemini CLI. It tells the agent to begin with structured status, follow declared next actions, use the generated workset at implementation, preserve managed outputs, and record factual evidence.
+An adapter is a thin repository Agent Skill for Codex, Claude Code, or Gemini CLI. It tells the agent to use structured status as the workflow navigator, follow declared next actions, use the generated workset at implementation, preserve managed outputs, and record factual evidence. The agent can continue through routine bounded steps without stopping after every command, but must stop when a real authority decision, unavailable information, consequential ambiguity, or a blocking condition requires the developer.
 
 Adapters do not contain a second workflow engine. They do not bypass `BLOCKED` or `REVIEW_REQUIRED`, and they do not turn `COMPLETE` into approval. Installation is explicit and does not modify root agent instruction files.
 

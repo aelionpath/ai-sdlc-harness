@@ -88,6 +88,8 @@ def test_rendered_skill_contains_required_workflow_contract_without_root_rewrite
     required = (
         "ai-sdlc status --json",
         "ai-sdlc status --task <slug> --json",
+        "You execute the engineering work",
+        "Harness does not invoke or orchestrate you",
         "selected_task",
         "phase",
         "outcome",
@@ -95,6 +97,12 @@ def test_rendered_skill_contains_required_workflow_contract_without_root_rewrite
         "four-key `lineage`",
         "BLOCKED",
         "REVIEW_REQUIRED",
+        "Continue through routine safe, bounded work rather than stopping after every Harness command",
+        "real authority or approval decision",
+        "required information is unavailable",
+        "scope or intent is consequentially ambiguous",
+        "changing authoritative intent merely to unblock yourself",
+        "never accept or approve for the user",
         "generated/agent-workset.md",
         "do not recursively load the whole `.harness` tree",
         "Never directly edit",
@@ -108,9 +116,10 @@ def test_rendered_skill_contains_required_workflow_contract_without_root_rewrite
         ".harness/packs/selected.yaml",
         "factual implementation evidence in `evidence.md`",
         "observed results in `verification.md`",
+        "human-owned does not mean human-authored-only",
         "COMPLETE",
         "human review",
-        "not proof of correctness, security, or compliance",
+        "not proof of correctness, security, compliance, approval, or release readiness",
     )
     assert all(item in text for item in required)
     assert "AGENTS.md" not in text

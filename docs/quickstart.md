@@ -46,7 +46,7 @@ The command prints the safe task slug and creates human-owned source files under
 .harness/tasks/add-request-timeout-handling/
 ```
 
-Fill in the generated templates. At minimum, make the task scope, acceptance criteria, and planned test and verification intent concrete in `task.md`, `acceptance.md`, and `test-contract.md`. Use the architecture and coupling notes when they are material.
+Fill in the generated templates. At minimum, make the task scope, acceptance criteria, and planned test and verification intent concrete in `task.md`, `acceptance.md`, and `test-contract.md`. Use the architecture and coupling notes when they are material. A coding agent may help draft these files, but it must not invent or redefine the developer's intent merely to advance the workflow.
 
 The complete human-owned source set is:
 
@@ -58,17 +58,29 @@ The complete human-owned source set is:
 - `verification.md`
 - `evidence.md`
 
-These files remain the authoritative workflow inputs. Do not edit generated reports to change task intent.
+These files remain the authoritative workflow inputs. “Human-owned” describes authority and ownership, not a requirement that a human manually type every line. Do not edit generated reports to change task intent.
 
 ## 4. Let Status Route The Work
 
-Ask the read-only workflow resolver what should happen next:
+The developer may ask the read-only workflow resolver what should happen next:
 
 ```bash
 ai-sdlc status --task add-request-timeout-handling
 ```
 
-Follow the command or human action shown under `next:`, then rerun the same status command. Depending on repository state, the command sequence will route through:
+With a supported repository Agent Skill installed, the more typical operating model is to give the coding agent the task and let it consult structured status repeatedly. For example:
+
+```text
+Work on task add-request-timeout-handling using the AI SDLC Harness workflow.
+Follow Harness status and continue through routine bounded work without stopping
+after every Harness command. Stop when you reach a human decision, need information
+from me, encounter consequential ambiguity about scope or intent, or Harness reports
+a blocking condition.
+```
+
+The coding agent performs the engineering work; Harness supplies current task state, deterministic next actions, integrity and currentness checks, bounded context, evidence expectations, and authority boundaries. Harness does not call or orchestrate the agent. Routine `NEXT` steps do not each require separate human approval.
+
+Whether the developer or agent is driving, follow the command or human action shown under `next:`, then rerun status. Depending on repository state, the sequence routes through:
 
 ```text
 preflight -> spec -> test-contract -> generate -> implementation
@@ -84,7 +96,7 @@ ai-sdlc test-contract --task add-request-timeout-handling
 ai-sdlc generate --task add-request-timeout-handling
 ```
 
-Do not assume every command should be run immediately. `status` can stop at a human-review boundary. If a producer refuses to replace a drifted managed output, inspect the mismatch before deciding whether that producer's explicit `--force` option is appropriate.
+Do not assume every command should be run immediately. `status` can stop at a human-review boundary or blocking condition. An agent may continue through routine safe producer actions, implementation, verification, and evidence work, but it cannot approve for the developer or change authoritative intent simply to unblock itself. If a producer refuses to replace a drifted managed output, inspect the mismatch before deciding whether that producer's explicit `--force` option is appropriate.
 
 If task source files change later, Lineage can mark dependent outputs stale and route you back to the correct producer. Update the human-owned source, not the generated output.
 
@@ -100,11 +112,11 @@ The workset packages current task intent, relevant repository context, warnings,
 
 `generate` also manages `generated/context-manifest.yaml`, the machine-readable record of the same context-selection snapshot. Do not edit either generated file directly.
 
-Implementation happens outside the Harness command flow. Change the application, tests, or configuration normally.
+Implementation happens outside Harness execution: Harness does not change the application itself. The coding agent or human implementer changes the application, tests, or configuration normally.
 
 ## 6. Record Evidence And Verification
 
-After implementation, update the human-owned files:
+After implementation, the coding agent or developer updates the human-owned factual records:
 
 - `evidence.md` — what changed, why, files affected, requirements addressed, and known gaps.
 - `verification.md` — commands actually run, observed results, and checks not run with the reason.
@@ -120,13 +132,15 @@ Validation reports workflow consistency and review-readiness signals. It does no
 
 ## 7. Stop At Human Review
 
-Continue rerunning:
+The developer may rerun this directly, or the coding agent may keep using it as the workflow navigator:
 
 ```bash
 ai-sdlc status --task add-request-timeout-handling
 ```
 
-Resolve any reported blocker. When validation warnings remain, status stops at `REVIEW_REQUIRED`: resolve them and rerun validation if you want to reach `COMPLETE`, or carry their documented acceptance into the normal human delivery decision. When the outcome becomes `COMPLETE`, Harness automation stops; the implementation still needs the repository's normal review, approval, and delivery process.
+The expected agent loop is: consult status, perform allowed work, update or regenerate the appropriate records, and consult status again. The agent need not pause after each routine transition. It must stop for a genuine human authority or approval decision, unavailable required information, consequentially ambiguous intent, or a reported blocker.
+
+Resolve any reported blocker. When validation warnings remain, status stops at `REVIEW_REQUIRED`: an agent may prepare information or proposed edits, but it cannot accept the warning for the developer. Resolve the warning and rerun validation if you want to reach `COMPLETE`, or carry its documented acceptance into the normal human delivery decision. When the outcome becomes `COMPLETE`, Harness workflow automation stops; the implementation still needs the repository's normal review, approval, and delivery process.
 
 You can check protected Harness state independently at any time:
 

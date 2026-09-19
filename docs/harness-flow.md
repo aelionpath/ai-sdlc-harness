@@ -9,7 +9,17 @@ init -> task start -> preflight -> spec -> test-contract -> generate
      -> implementation -> evidence -> validate -> review -> complete
 ```
 
-Run `status` between steps and follow its displayed command or human action. `verify` is an independent integrity check that can be run at any time.
+Use `status` between steps and follow its displayed command or human action. A developer can do this directly, but with a repository Agent Skill the normal bounded loop can be agent-driven:
+
+```text
+agent consults Harness status
+-> agent performs the allowed work
+-> agent updates factual sources or runs the owning producer
+-> agent consults Harness status again
+-> continue until blocked or a human authority decision is required
+```
+
+Routine `NEXT` transitions do not require individual human approval. The coding agent executes the engineering work; Harness remains a deterministic control layer and does not call, launch, or orchestrate the agent. `verify` is an independent integrity check that can be run at any time.
 
 ## Task Model
 
@@ -25,7 +35,7 @@ Start with a rough task title. The harness creates normalized task artifacts und
 - `verification.md`
 - `evidence.md`
 
-The harness can generate reports and worksets from those files, but the human-owned task artifacts remain the source for task intent and evidence notes.
+The harness can generate reports and worksets from those files, but the human-owned task artifacts remain the source for task intent and evidence notes. Human-owned describes authority, not exclusive authorship: an agent may assist with these files within the developer's intent, but cannot self-approve or redefine that intent to make progress.
 
 ## Source Of Truth
 
@@ -166,7 +176,7 @@ Writes:
 
 ### 7. Implement
 
-Implementation happens outside the harness command flow. A human or coding agent changes the repository, uses the workset as context, and updates task artifacts as needed.
+Implementation happens outside Harness execution. A coding agent or human changes the repository, uses the workset as context, and updates task artifacts as needed; Harness itself does not implement or continuously run in the background.
 
 Keep planned checks in `test-contract.md`. Record what actually happened in:
 
@@ -234,6 +244,8 @@ Writes:
 - nothing
 
 `status` is the read-only workflow resolver. It derives the current phase, one outcome (`NEXT`, `REVIEW_REQUIRED`, `BLOCKED`, or `COMPLETE`), and the next valid command or human action. With multiple tasks, select one explicitly with `--task`; no active-task choice is persisted or guessed. `COMPLETE` means the Harness workflow record is complete, not that the implementation is correct, secure, compliant, approved, or ready to release.
+
+For an agent-driven task, `NEXT` normally permits the agent to perform the bounded action and consult status again. `REVIEW_REQUIRED` identifies material that needs human review, resolution, or acceptance; the agent may prepare supporting work but cannot supply the developer's approval. `BLOCKED` stops progression until the reported condition is resolved.
 
 ### 11. Verify Integrity
 
