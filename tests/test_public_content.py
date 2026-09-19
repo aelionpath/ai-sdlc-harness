@@ -392,3 +392,119 @@ def test_public_ci_distribution_and_required_jobs_are_non_publishing_and_fail_cl
     }
     assert 'test "$TEST_RESULT" = "success"' in required_step["run"]
     assert 'test "$DISTRIBUTION_RESULT" = "success"' in required_step["run"]
+
+
+def test_public_release_workflow_is_manual_only_and_approval_gated():
+    workflow_path = ROOT / ".github/workflows/release.yml"
+    workflow_text = workflow_path.read_text(encoding="utf-8")
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+
+    assert workflow["name"] == "Release"
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["on"] == {
+        "workflow_dispatch": {
+            "inputs": {
+                "tag": {
+                    "description": "Existing reviewed release tag, for example v1.0.0",
+                    "required": "true",
+                    "type": "string",
+                }
+            }
+        }
+    }
+    for automatic_trigger in ("push", "pull_request", "release", "schedule"):
+        assert automatic_trigger not in workflow["on"]
+    assert "pull_request_target" not in workflow_text
+
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build_and_audit", "publish_pypi", "create_github_release"}
+
+    build = jobs["build_and_audit"]
+    publish = jobs["publish_pypi"]
+    release = jobs["create_github_release"]
+    assert build["permissions"] == {"contents": "read"}
+    assert publish["needs"] == "build_and_audit"
+    assert publish["environment"] == {
+        "name": "pypi",
+        "url": "https://pypi.org/p/ai-sdlc-harness",
+    }
+    assert publish["permissions"] == {"contents": "read", "id-token": "write"}
+    assert publish["permissions"].get("contents") != "write"
+    assert release["needs"] == ["build_and_audit", "publish_pypi"]
+    assert release["permissions"] == {"contents": "write"}
+    assert "id-token" not in release["permissions"]
+
+
+def test_public_release_workflow_builds_once_and_reuses_exact_audited_bytes():
+    workflow_text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = yaml.load(workflow_text, Loader=yaml.BaseLoader)
+    jobs = workflow["jobs"]
+
+    build_commands = "\n".join(
+        step.get("run", "") for step in jobs["build_and_audit"]["steps"]
+    )
+    publish_commands = "\n".join(
+        step.get("run", "") for step in jobs["publish_pypi"]["steps"]
+    )
+    release_commands = "\n".join(
+        step.get("run", "") for step in jobs["create_github_release"]["steps"]
+    )
+
+    assert workflow_text.count("python -m build --outdir") == 1
+    assert "python -m build" not in publish_commands
+    assert "python -m build" not in release_commands
+    assert "python -m twine check --strict" in build_commands
+    assert "python .github/audit_release_artifacts.py \"$DIST_DIR\"" in build_commands
+    assert "python .github/audit_release_artifacts.py --verify \"$DIST_DIR\"" in build_commands
+    assert 'sha256sum --check SHA256SUMS' in build_commands
+    assert 'sha256sum --check SHA256SUMS' in publish_commands
+    assert 'sha256sum --check SHA256SUMS' in release_commands
+    assert "ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl" in workflow_text
+    assert "ai_sdlc_harness-${PROJECT_VERSION}.tar.gz" in workflow_text
+    assert "SHA256SUMS" in workflow_text
+
+    build_uses = [step["uses"] for step in jobs["build_and_audit"]["steps"] if "uses" in step]
+    publish_uses = [step["uses"] for step in jobs["publish_pypi"]["steps"] if "uses" in step]
+    release_uses = [step["uses"] for step in jobs["create_github_release"]["steps"] if "uses" in step]
+    assert build_uses[-1].startswith("actions/upload-artifact@")
+    upload_step = next(
+        step for step in jobs["build_and_audit"]["steps"]
+        if step.get("uses", "").startswith("actions/upload-artifact@")
+    )
+    assert upload_step["with"]["retention-days"] == "7"
+    assert publish_uses[0].startswith("actions/download-artifact@")
+    assert release_uses == [
+        "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+    ]
+    assert publish_uses[-1] == (
+        "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    )
+    assert "packages-dir: pypi-dist/" in workflow_text
+    assert "skip-existing" not in workflow_text
+    assert "password:" not in workflow_text
+    assert "secrets." not in workflow_text
+
+
+def test_public_release_workflow_fails_closed_on_identity_and_existing_release():
+    workflow_text = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+
+    assert 'test "$GITHUB_REPOSITORY" = "aelionpath/ai-sdlc-harness"' in workflow_text
+    assert "packaging.version" in workflow_text
+    assert "git ls-remote --exit-code --tags origin" in workflow_text
+    assert "git rev-parse \"${RELEASE_TAG}^{commit}\"" in workflow_text
+    assert "git merge-base --is-ancestor" in workflow_text
+    assert "git checkout --detach" in workflow_text
+    assert "ai-sdlc ${PROJECT_VERSION}" in workflow_text
+    assert workflow_text.count("a GitHub Release already exists") == 2
+    assert "gh release create \"$RELEASE_TAG\"" in workflow_text
+    assert "--verify-tag" in workflow_text
+    assert "gh release upload" not in workflow_text
+    assert "--clobber" not in workflow_text
+
+    pinned_actions = re.findall(r"^\s*uses:\s*(\S+)", workflow_text, flags=re.MULTILINE)
+    assert pinned_actions
+    assert all(re.search(r"@[0-9a-f]{40}$", action) for action in pinned_actions)
+    assert "# v7.0.1" in workflow_text
+    assert "# v7.0.0" in workflow_text
+    assert "# v8.0.1" in workflow_text
+    assert "# v1.14.2" in workflow_text

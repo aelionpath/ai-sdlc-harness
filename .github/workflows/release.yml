@@ -1,0 +1,332 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing reviewed release tag, for example v1.0.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build_and_audit:
+    name: Validate tag, build once, and audit
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      project_version: ${{ steps.release_identity.outputs.project_version }}
+      release_tag: ${{ steps.release_identity.outputs.release_tag }}
+    steps:
+      - name: Validate repository and tag input shape
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "aelionpath/ai-sdlc-harness"
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9][0-9A-Za-z.+-]{0,63}$ ]]; then
+            echo "release tag must have a safe v<PEP440-version> shape" >&2
+            exit 1
+          fi
+
+      - name: Check out full public history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up stable Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+          allow-prereleases: false
+          check-latest: true
+
+      - name: Install build and release validation tools
+        run: python -m pip install build twine
+
+      - name: Validate exact release identity and main ancestry
+        id: release_identity
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          remote_commit="$(git ls-remote --tags origin "refs/tags/${RELEASE_TAG}^{}" | awk 'NR == 1 { print $1 }')"
+          if [[ -z "$remote_commit" ]]; then
+            remote_commit="$(git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" | awk 'NR == 1 { print $1 }')"
+          fi
+          test -n "$remote_commit"
+
+          git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"
+          tag_commit="$(git rev-parse "${RELEASE_TAG}^{commit}")"
+          test "$tag_commit" = "$remote_commit"
+
+          git fetch --no-tags origin main
+          main_commit="$(git rev-parse FETCH_HEAD)"
+          git merge-base --is-ancestor "$tag_commit" "$main_commit"
+
+          git checkout --detach "$tag_commit"
+          test "$(git rev-parse HEAD)" = "$tag_commit"
+          test "$(git rev-parse "${RELEASE_TAG}^{commit}")" = "$(git rev-parse HEAD)"
+
+          project_version="$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          export PROJECT_VERSION="$project_version"
+          python - <<'PY'
+          import os
+          from packaging.version import InvalidVersion, Version
+
+          project_version = os.environ["PROJECT_VERSION"]
+          release_tag = os.environ["RELEASE_TAG"]
+          try:
+              parsed_project = Version(project_version)
+              parsed_tag = Version(release_tag[1:])
+          except InvalidVersion as exc:
+              raise SystemExit(f"invalid PEP 440 release identity: {exc}") from exc
+          if str(parsed_project) != project_version:
+              raise SystemExit("project version must use canonical PEP 440 spelling")
+          if parsed_tag != parsed_project or release_tag != f"v{project_version}":
+              raise SystemExit(
+                  f"release tag {release_tag!r} does not exactly match project version {project_version!r}"
+              )
+          PY
+
+          printf 'project_version=%s\n' "$project_version" >> "$GITHUB_OUTPUT"
+          printf 'release_tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Require GitHub Release to be absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_identity.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +e
+          response="$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>&1)"
+          result=$?
+          set -e
+          if [[ "$result" -eq 0 ]]; then
+            echo "a GitHub Release already exists for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if ! grep -Eq '^HTTP/[^ ]+ 404 ' <<<"$response"; then
+            printf '%s\n' "$response" >&2
+            echo "could not prove that the GitHub Release is absent" >&2
+            exit 1
+          fi
+
+      - name: Build wheel and sdist exactly once
+        env:
+          PROJECT_VERSION: ${{ steps.release_identity.outputs.project_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST_DIR="$RUNNER_TEMP/ai-sdlc-release-dist"
+          test ! -e "$DIST_DIR"
+          mkdir "$DIST_DIR"
+          python -m build --outdir "$DIST_DIR"
+
+          wheel="$DIST_DIR/ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl"
+          sdist="$DIST_DIR/ai_sdlc_harness-${PROJECT_VERSION}.tar.gz"
+          test -f "$wheel"
+          test -f "$sdist"
+          test "$(find "$DIST_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 2
+
+      - name: Check, audit, and verify release artifacts
+        env:
+          PROJECT_VERSION: ${{ steps.release_identity.outputs.project_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST_DIR="$RUNNER_TEMP/ai-sdlc-release-dist"
+          wheel="$DIST_DIR/ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl"
+          sdist="$DIST_DIR/ai_sdlc_harness-${PROJECT_VERSION}.tar.gz"
+
+          python -m twine check --strict "$wheel" "$sdist"
+          python .github/audit_release_artifacts.py "$DIST_DIR"
+          python .github/audit_release_artifacts.py --verify "$DIST_DIR"
+          test -f "$DIST_DIR/SHA256SUMS"
+          test "$(find "$DIST_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+
+      - name: Smoke-test the exact wheel and sdist
+        env:
+          PROJECT_VERSION: ${{ steps.release_identity.outputs.project_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          DIST_DIR="$RUNNER_TEMP/ai-sdlc-release-dist"
+          wheel="$DIST_DIR/ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl"
+          sdist="$DIST_DIR/ai_sdlc_harness-${PROJECT_VERSION}.tar.gz"
+
+          python -m venv "$RUNNER_TEMP/wheel-venv"
+          "$RUNNER_TEMP/wheel-venv/bin/python" -m pip install "$wheel"
+          mkdir "$RUNNER_TEMP/wheel-smoke"
+          test "$("$RUNNER_TEMP/wheel-venv/bin/ai-sdlc" --version)" = "ai-sdlc ${PROJECT_VERSION}"
+          "$RUNNER_TEMP/wheel-venv/bin/ai-sdlc" --help >/dev/null
+          (
+            cd "$RUNNER_TEMP/wheel-smoke"
+            "$RUNNER_TEMP/wheel-venv/bin/ai-sdlc" init
+          )
+
+          python -m venv "$RUNNER_TEMP/sdist-venv"
+          "$RUNNER_TEMP/sdist-venv/bin/python" -m pip install "$sdist"
+          test "$("$RUNNER_TEMP/sdist-venv/bin/ai-sdlc" --version)" = "ai-sdlc ${PROJECT_VERSION}"
+          "$RUNNER_TEMP/sdist-venv/bin/ai-sdlc" --help >/dev/null
+
+          (
+            cd "$DIST_DIR"
+            sha256sum --check SHA256SUMS
+          )
+
+      - name: Upload the audited release artifact set
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ai-sdlc-harness-release-artifacts
+          path: |
+            ${{ runner.temp }}/ai-sdlc-release-dist/ai_sdlc_harness-${{ steps.release_identity.outputs.project_version }}-py3-none-any.whl
+            ${{ runner.temp }}/ai-sdlc-release-dist/ai_sdlc_harness-${{ steps.release_identity.outputs.project_version }}.tar.gz
+            ${{ runner.temp }}/ai-sdlc-release-dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+
+  publish_pypi:
+    name: Publish approved artifacts to PyPI
+    needs: build_and_audit
+    runs-on: ubuntu-24.04
+    environment:
+      name: pypi
+      url: https://pypi.org/p/ai-sdlc-harness
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Download audited release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-sdlc-harness-release-artifacts
+          path: release-artifacts
+
+      - name: Verify checksums and isolate Python distributions
+        env:
+          PROJECT_VERSION: ${{ needs.build_and_audit.outputs.project_version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$GITHUB_WORKSPACE/release-artifacts"
+          PYPI_DIR="$GITHUB_WORKSPACE/pypi-dist"
+          wheel="$ARTIFACT_DIR/ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl"
+          sdist="$ARTIFACT_DIR/ai_sdlc_harness-${PROJECT_VERSION}.tar.gz"
+          test -f "$wheel"
+          test -f "$sdist"
+          test -f "$ARTIFACT_DIR/SHA256SUMS"
+          test "$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find "$ARTIFACT_DIR" -mindepth 2 -type f | wc -l)" -eq 0
+          (
+            cd "$ARTIFACT_DIR"
+            sha256sum --check SHA256SUMS
+          )
+          test ! -e "$PYPI_DIR"
+          mkdir "$PYPI_DIR"
+          cp "$wheel" "$sdist" "$PYPI_DIR/"
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          packages-dir: pypi-dist/
+
+  create_github_release:
+    name: Create GitHub Release with the published bytes
+    needs: [build_and_audit, publish_pypi]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download the same audited release artifacts
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ai-sdlc-harness-release-artifacts
+          path: release-artifacts
+
+      - name: Verify checksums and require release absence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_VERSION: ${{ needs.build_and_audit.outputs.project_version }}
+          RELEASE_TAG: ${{ needs.build_and_audit.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$GITHUB_WORKSPACE/release-artifacts"
+          test -f "$ARTIFACT_DIR/ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl"
+          test -f "$ARTIFACT_DIR/ai_sdlc_harness-${PROJECT_VERSION}.tar.gz"
+          test -f "$ARTIFACT_DIR/SHA256SUMS"
+          test "$(find "$ARTIFACT_DIR" -mindepth 1 -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(find "$ARTIFACT_DIR" -mindepth 2 -type f | wc -l)" -eq 0
+          (
+            cd "$ARTIFACT_DIR"
+            sha256sum --check SHA256SUMS
+          )
+
+          set +e
+          response="$(gh api --include "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" 2>&1)"
+          result=$?
+          set -e
+          if [[ "$result" -eq 0 ]]; then
+            echo "a GitHub Release already exists for ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          if ! grep -Eq '^HTTP/[^ ]+ 404 ' <<<"$response"; then
+            printf '%s\n' "$response" >&2
+            echo "could not prove that the GitHub Release is absent" >&2
+            exit 1
+          fi
+
+      - name: Create deterministic release notes
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/release-notes.md" <<'EOF'
+          AI SDLC Harness is a repo-local control layer for bounded, reviewable AI-assisted software changes.
+
+          Install with:
+
+          ```text
+          uv tool install ai-sdlc-harness
+          ```
+
+          Or use `pipx install ai-sdlc-harness`. Python 3.11 or newer is required.
+
+          Supported coding-agent integrations: Codex, Claude Code, and Gemini CLI.
+
+          Trust boundaries:
+
+          - Harness does not call an AI model.
+          - Harness does not automatically run project commands or tests.
+          - Harness does not modify root `AGENTS.md`, `CLAUDE.md`, or `GEMINI.md`.
+
+          See the [README](https://github.com/aelionpath/ai-sdlc-harness#readme) and [Quickstart](https://github.com/aelionpath/ai-sdlc-harness/blob/main/docs/quickstart.md). See [SECURITY.md](https://github.com/aelionpath/ai-sdlc-harness/security/policy) for the security policy, and use [private vulnerability reporting](https://github.com/aelionpath/ai-sdlc-harness/security/advisories/new) for sensitive reports.
+
+          SHA-256 checksums for the attached wheel and Python source distribution are in `SHA256SUMS`.
+          EOF
+
+      - name: Create GitHub Release and attach exact artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROJECT_VERSION: ${{ needs.build_and_audit.outputs.project_version }}
+          RELEASE_TAG: ${{ needs.build_and_audit.outputs.release_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ARTIFACT_DIR="$GITHUB_WORKSPACE/release-artifacts"
+          gh release create "$RELEASE_TAG" \
+            "$ARTIFACT_DIR/ai_sdlc_harness-${PROJECT_VERSION}-py3-none-any.whl" \
+            "$ARTIFACT_DIR/ai_sdlc_harness-${PROJECT_VERSION}.tar.gz" \
+            "$ARTIFACT_DIR/SHA256SUMS" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AI SDLC Harness ${RELEASE_TAG}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md" \
+            --verify-tag
