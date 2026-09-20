@@ -6,6 +6,7 @@ from pathlib import Path, PurePosixPath
 import pytest
 import yaml
 
+import ai_sdlc_harness.validation as validation_module
 from ai_sdlc_harness.files import sha256_bytes
 from ai_sdlc_harness.validation import (
     CapturedValidationDependency,
@@ -432,7 +433,7 @@ def test_existing_task_artifact_and_aggregate_rules_are_preserved(project_tmp):
     )
 
 
-def test_semantic_warnings_and_imported_findings_are_preserved_and_deduplicated(
+def test_prior_report_observations_are_preserved_but_excluded_from_semantics(
     project_tmp,
 ):
     _write_clean_repository(project_tmp)
@@ -441,12 +442,16 @@ def test_semantic_warnings_and_imported_findings_are_preserved_and_deduplicated(
     (root / "verification.md").write_text("# Verification\n\nNo command.\n")
     (root / "evidence.md").write_text("# Evidence\n\nNo result.\n")
     (root / "preflight.md").write_text(
+        "# Preflight Report\n\n## Findings\n\n"
         "- warning: shared issue.\n- info: useful context.\n"
     )
     (root / "test-contract-review.md").write_text(
+        "# Test-Contract Readiness Review\n\n## Findings\n\n"
         "- warning: SHARED ISSUE.\n"
     )
-    (root / "evidence-report.md").write_text("- blocker: evidence gap.\n")
+    (root / "evidence-report.md").write_text(
+        "# Evidence Report\n\n## Findings\n\n- blocker: evidence gap.\n"
+    )
     (project_tmp / ".github" / "workflows").rmdir()
     (project_tmp / "tests").rmdir()
     (project_tmp / "pytest.ini").unlink()
@@ -460,18 +465,24 @@ def test_semantic_warnings_and_imported_findings_are_preserved_and_deduplicated(
     assert "no verification command recorded." in messages
     assert "no test result evidence recorded." in messages
     assert "no CI detected." in messages
-    assert "no test framework detected." in messages
-    assert messages.count("preflight.md reported warning: shared issue.") == 1
-    assert not any("test-contract-review.md reported warning" in item for item in messages)
-    assert "evidence-report.md reported blocker: evidence gap." in messages
-    assert result.info_count == 8
+    assert "no recognized test-framework signal detected." in messages
+    assert not any("reported warning: shared issue" in item for item in messages)
+    assert not any("reported blocker: evidence gap" in item for item in messages)
+    assert [(item.source, item.level, item.message) for item in result.report_findings] == [
+        ("preflight.md", "warning", "shared issue."),
+        ("preflight.md", "info", "useful context."),
+        ("test-contract-review.md", "warning", "SHARED ISSUE."),
+        ("evidence-report.md", "blocker", "evidence gap."),
+    ]
+    assert result.info_count == 7
 
 
 def test_prior_report_finding_import_is_bounded_to_thirty(project_tmp):
     _write_clean_repository(project_tmp)
     report = project_tmp / ".harness" / "tasks" / SLUG / "preflight.md"
     report.write_text(
-        "".join(f"- warning: bounded finding {index}.\n" for index in range(40))
+        "# Preflight Report\n\n## Findings\n\n"
+        + "".join(f"- warning: bounded finding {index}.\n" for index in range(40))
     )
 
     result = inspect_validation_snapshot(
@@ -479,7 +490,85 @@ def test_prior_report_finding_import_is_bounded_to_thirty(project_tmp):
     )
 
     assert len(result.report_findings) == 30
-    assert sum("reported warning: bounded finding" in item.message for item in result.findings) == 30
+    assert not any("bounded finding" in item.message for item in result.findings)
+
+
+def test_prior_report_parsing_is_limited_to_explicit_findings_sections(project_tmp):
+    _write_clean_repository(project_tmp)
+    report = project_tmp / ".harness" / "tasks" / SLUG / "evidence-report.md"
+    report.write_text(
+        "# Evidence Report\n\n## Summary\n\n- Info: 4\n"
+        "- warning: summary prose.\n\n## Supporting Artifacts\n\n"
+        "- warning: excerpt prose.\n\n## Findings\n\n"
+        "- warning: retained observation.\n\n## Recommended Next Actions\n\n"
+        "- warning: action prose.\n"
+    )
+
+    result = inspect_validation_snapshot(
+        capture_validation_snapshot(project_tmp, SLUG)
+    )
+
+    assert [(item.level, item.message) for item in result.report_findings] == [
+        ("warning", "retained observation.")
+    ]
+    assert not any("observation" in item.message for item in result.findings)
+
+
+def test_distinct_current_findings_with_identical_text_are_not_collapsed(
+    project_tmp, monkeypatch
+):
+    snapshot = _clean_snapshot(project_tmp)
+    original = validation_module._requirements_status
+
+    def duplicate_problems(dependency, task_slug):
+        return replace(
+            original(dependency, task_slug),
+            schema_valid=False,
+            problems=("duplicate current problem.", "duplicate current problem."),
+        )
+
+    monkeypatch.setattr(validation_module, "_requirements_status", duplicate_problems)
+
+    result = inspect_validation_snapshot(snapshot)
+
+    message = "requirements.yaml schema invalid: duplicate current problem."
+    assert [item.message for item in result.findings].count(message) == 2
+    assert result.blocker_count == 2
+
+
+def test_clean_room_pattern_has_one_current_warning_and_retained_observations(
+    project_tmp,
+):
+    _write_clean_repository(project_tmp)
+    root = project_tmp / ".harness" / "tasks" / SLUG
+    (project_tmp / "tests").rmdir()
+    (project_tmp / "pytest.ini").unlink()
+    (project_tmp / ".github" / "workflows").rmdir()
+    (root / "test-contract.md").write_text(
+        "# Tests\n\n## Desired Behavior Tests\n\nRun py -m unittest -v.\n"
+    )
+    (root / "preflight.md").write_text(
+        "# Preflight Report\n\n## Findings\n\n- warning: historical warning.\n"
+    )
+    (root / "evidence-report.md").write_text(
+        "# Evidence Report\n\n## Supporting Artifacts\n\n"
+        "- warning: stale workset warning.\n\n## Findings\n\n"
+        "- warning: prior evidence warning.\n"
+    )
+
+    result = inspect_validation_snapshot(
+        capture_validation_snapshot(project_tmp, SLUG)
+    )
+
+    assert result.blocker_count == 0
+    assert result.warning_count == 1
+    assert [item.message for item in result.findings if item.level == "warning"] == [
+        "no CI detected."
+    ]
+    assert [(item.source, item.message) for item in result.report_findings] == [
+        ("preflight.md", "historical warning."),
+        ("evidence-report.md", "prior evidence warning."),
+    ]
 
 
 @pytest.mark.parametrize(

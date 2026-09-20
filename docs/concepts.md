@@ -16,6 +16,23 @@ In short: coding agent = executor, Harness = control layer, developer = authorit
 
 ![Human intent passes through Harness controls to bounded agent implementation and structured workflow output](images/what-harness-does.png)
 
+## Trust Boundary
+
+AI SDLC Harness is a procedural control layer, not a security sandbox or runtime reference monitor. It deterministically structures and maintains the repository workflow record: authoritative task intent, bounded context, workflow state, validation currentness, verification and evidence expectations, human decision points, and agent-facing instructions and next actions. These controls define the intended operating envelope for the coding agent without reducing Harness to documentation alone.
+
+Harness does not call a model or launch or orchestrate an agent. Harness workflow and authority boundaries are not security boundaries or technical restrictions on an already-running agent or its tools. Harness cannot prevent an agent, model, shell, IDE, or other execution environment from ignoring instructions, modifying out-of-scope files, running available commands, accessing data or secrets allowed by that environment, committing or pushing when credentials and repository permissions allow it, performing destructive actions, or interacting with deployment or production systems when separately authorized.
+
+The underlying runtime and platform controls determine what execution is technically possible, while Harness makes explicit what work is intended, current, bounded, and reviewable. When prevention matters, use controls such as OS, container, or VM sandboxing; filesystem and process permissions; least-privilege credentials and secret isolation; repository permissions and branch protections; CI/CD policy and protected deployment environments; network restrictions; and execution isolation.
+
+The responsibility boundary is therefore:
+
+```text
+Harness defines and maintains the intended operating envelope.
+Platform and security controls enforce what must be technically impossible.
+```
+
+The developer remains the authority over intent, consequential decisions, and acceptance. Routine bounded work may proceed through Harness-directed next actions without human approval after every command, but `COMPLETE` means only that the Harness workflow record is complete—not that the change is correct, secure, compliant, approved, or ready for release.
+
 ## Artifact Model
 
 | Kind | Examples | Rule |

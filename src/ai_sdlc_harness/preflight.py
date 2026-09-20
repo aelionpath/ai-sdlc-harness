@@ -11,7 +11,7 @@ from typing import Any, Mapping
 import yaml
 
 from .constants import PREFLIGHT_FILENAME, TASK_ARTIFACT_FILENAMES, TASK_SLUG_PATTERN
-from .detect import detect_project_signals
+from .detect import detect_project_signals, merge_documented_test_frameworks
 from .files import (
     persist_exact_bytes,
     resolve_managed_output_under_root,
@@ -449,7 +449,9 @@ def _findings(signals: dict[str, Any], readiness: list[ArtifactReadiness]) -> li
             findings.append(Finding("warning", "verification results are not recorded yet."))
 
     if not signals.get("detected_test_frameworks"):
-        findings.append(Finding("warning", "no test framework detected."))
+        findings.append(
+            Finding("warning", "no recognized test-framework signal detected.")
+        )
     if not signals.get("detected_ci"):
         findings.append(Finding("warning", "no CI detected."))
 
@@ -705,8 +707,13 @@ def run_preflight(root: Path, task_slug: str, *, dry_run: bool = False, force: b
     except Exception as exc:
         return 1, [f"Could not snapshot preflight provenance inputs: {exc}"]
 
-    signals = detect_project_signals(root)
     readiness = _artifact_readiness(task_slug, captured_by_path)
+    readiness_by_name = {item.filename: item for item in readiness}
+    signals = merge_documented_test_frameworks(
+        detect_project_signals(root),
+        readiness_by_name["test-contract.md"].text,
+        readiness_by_name["verification.md"].text,
+    )
     selected_packs = _load_selected_packs(
         captured_by_path[".harness/packs/selected.yaml"]
     )

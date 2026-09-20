@@ -185,6 +185,14 @@ def render_workflow_status(state: WorkflowState) -> list[str]:
             validation = state.validation_currentness.value
             if state.validation_clean:
                 validation += " and CLEAN"
+            elif (
+                state.validation_blocker_count is not None
+                and state.validation_warning_count is not None
+            ):
+                validation += (
+                    f" ({state.validation_blocker_count} blocker(s), "
+                    f"{state.validation_warning_count} warning(s))"
+                )
             messages.append(f"  validation: {validation}")
         if state.integrity_clean is True:
             messages.append("  repository integrity: clean")

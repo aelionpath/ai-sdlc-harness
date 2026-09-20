@@ -20,6 +20,7 @@ from .constants import (
     VALIDATION_REPORT_FILENAME,
 )
 from .context import FreshnessState
+from .detect import detect_documented_test_frameworks
 from .files import (
     PathSafetyError,
     resolve_managed_output_under_root,
@@ -52,7 +53,7 @@ from .requirements import RequirementsReadResult, parse_requirements_text
 TASK_SLUG_RE = re.compile(TASK_SLUG_PATTERN)
 TODO_RE = re.compile(r"\b(?:todo|tbd|fixme)\b", re.IGNORECASE)
 FINDING_LINE_RE = re.compile(
-    r"^\s*-?\s*(?:[^:]{1,80}:\s+)?(blocker|warning|info):\s+(.+?)\s*$",
+    r"^\s*-\s*(blocker|warning|info):\s+(.+?)\s*$",
     re.IGNORECASE,
 )
 TEST_COMMAND_RE = re.compile(
@@ -1021,20 +1022,24 @@ def _report_findings(
     generated_reports: tuple[ArtifactStatus, ...]
 ) -> tuple[ReportFinding, ...]:
     findings: list[ReportFinding] = []
-    seen: set[tuple[str, str]] = set()
     for item in generated_reports:
         if item.filename not in _PRIOR_FINDING_REPORTS or not item.readable:
             continue
+        in_findings = False
         for line in item.text.splitlines():
+            if line.startswith("## "):
+                heading = line[3:].strip().casefold()
+                if in_findings:
+                    break
+                in_findings = heading == "findings"
+                continue
+            if not in_findings:
+                continue
             match = FINDING_LINE_RE.match(line)
             if not match:
                 continue
             level = match.group(1).lower()
             message = match.group(2).strip()
-            key = (level, message.casefold())
-            if key in seen:
-                continue
-            seen.add(key)
             findings.append(ReportFinding(item.filename, level, message))
             if len(findings) >= 30:
                 return tuple(findings)
@@ -1092,18 +1097,6 @@ def _observation_result(
     raise ValidationInspectionError(
         f"closed validation observation is missing: {path} {predicate.value}"
     )
-
-
-def _deduplicate_findings(findings: list[Finding]) -> tuple[Finding, ...]:
-    result: list[Finding] = []
-    seen: set[tuple[str, str]] = set()
-    for finding in findings:
-        key = (finding.level, finding.message.casefold())
-        if key in seen:
-            continue
-        seen.add(key)
-        result.append(finding)
-    return tuple(result)
 
 
 def _workflow_checks(
@@ -1298,16 +1291,14 @@ def inspect_validation_snapshot(
         "pytest.ini",
         ValidationObservationPredicate.IS_FILE,
     )
-    if not (tests_directory or pytest_config):
-        findings.append(Finding("warning", "no test framework detected."))
-
-    findings.extend(
-        Finding(
-            report_finding.level,
-            f"{report_finding.source} reported {report_finding.level}: {report_finding.message}",
-        )
-        for report_finding in report_findings
+    documented_test_frameworks = detect_documented_test_frameworks(
+        test_contract.text,
+        verification.text,
     )
+    if not (tests_directory or pytest_config or documented_test_frameworks):
+        findings.append(
+            Finding("warning", "no recognized test-framework signal detected.")
+        )
     if (
         structured_requirements.present
         and structured_requirements.readable
@@ -1318,7 +1309,7 @@ def inspect_validation_snapshot(
             for problem in structured_requirements.problems
         )
     findings.extend(Finding("info", message) for message in _FIXED_INFO_MESSAGES)
-    canonical_findings = _deduplicate_findings(findings)
+    canonical_findings = tuple(findings)
     blocker_count = sum(
         finding.level == "blocker" for finding in canonical_findings
     )

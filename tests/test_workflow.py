@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -19,6 +19,7 @@ from ai_sdlc_harness.status import status_project
 from ai_sdlc_harness.task import start_task
 from ai_sdlc_harness.test_contract import run_test_contract_review
 from ai_sdlc_harness.validation import (
+    Finding as ValidationFinding,
     ValidationCurrentnessFinding,
     ValidationCurrentnessResult,
     ValidationCurrentnessState,
@@ -752,7 +753,16 @@ def test_current_semantic_blockers_warnings_and_clean_are_distinct(project_tmp, 
     warning = resolve_workflow_state(project_tmp)
     assert warning.phase is WorkflowPhase.REVIEW
     assert warning.outcome is WorkflowOutcomeCategory.REVIEW_REQUIRED
-    assert warning.validation_warning_count
+    assert warning.validation_blocker_count == 0
+    assert warning.validation_warning_count == 1
+    assert warning.integrity_clean is True
+    assert warning.next_actions[0].text == (
+        "Review and resolve or accept the current validation warning."
+    )
+    human_code, human = status_project(project_tmp)
+    assert human_code == 0
+    assert "  validation: current (0 blocker(s), 1 warning(s))" in human
+    assert "  repository integrity: clean" in human
 
     (project_tmp / ".github" / "workflows").mkdir()
     _task_path(project_tmp, "architecture-notes.md").write_text(
@@ -812,6 +822,71 @@ def test_complete_retains_final_full_verification(project_tmp, monkeypatch):
     assert state.phase is WorkflowPhase.COMPLETE
     assert state.outcome is WorkflowOutcomeCategory.COMPLETE
     assert policy_calls == [True, False]
+
+
+def test_review_reuses_successful_integrity_check_without_second_verification(
+    project_tmp, monkeypatch
+):
+    _prepare_task(project_tmp)
+    _write_clean_semantic_outputs(project_tmp)
+    (project_tmp / ".github" / "workflows").rmdir()
+    _patch_lineage(monkeypatch)
+    _patch_currentness(monkeypatch, ValidationCurrentnessState.CURRENT)
+    real_verify = workflow_module.verify_project
+    policy_calls: list[bool] = []
+
+    def recording_verify(
+        root: Path,
+        *,
+        allow_human_source_readiness: bool = False,
+    ) -> tuple[int, list[str]]:
+        policy_calls.append(allow_human_source_readiness)
+        return real_verify(
+            root,
+            allow_human_source_readiness=allow_human_source_readiness,
+        )
+
+    monkeypatch.setattr(workflow_module, "verify_project", recording_verify)
+
+    state = resolve_workflow_state(project_tmp)
+
+    assert state.phase is WorkflowPhase.REVIEW
+    assert state.integrity_clean is True
+    assert policy_calls == [True]
+
+
+def test_bounded_status_findings_do_not_change_authoritative_current_count(
+    project_tmp, monkeypatch
+):
+    _prepare_task(project_tmp)
+    _write_clean_semantic_outputs(project_tmp)
+    _patch_lineage(monkeypatch)
+    _patch_currentness(monkeypatch, ValidationCurrentnessState.CURRENT)
+    inspection = workflow_module.inspect_validation_snapshot(
+        workflow_module.capture_validation_snapshot(project_tmp, SLUG)
+    )
+    warnings = tuple(
+        ValidationFinding("warning", f"current warning {index}.")
+        for index in range(7)
+    )
+    monkeypatch.setattr(
+        workflow_module,
+        "inspect_validation_snapshot",
+        lambda *_: replace(
+            inspection,
+            findings=warnings,
+            blocker_count=0,
+            warning_count=7,
+            info_count=0,
+            clean=False,
+        ),
+    )
+
+    state = resolve_workflow_state(project_tmp)
+
+    assert state.validation_warning_count == 7
+    assert len(state.findings) == 6
+    assert state.findings[-1].message == "2 additional finding(s) omitted."
 
 
 def test_complete_is_prevented_by_generated_output_integrity_drift(project_tmp, monkeypatch):

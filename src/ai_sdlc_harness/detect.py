@@ -2,8 +2,38 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
+
+
+DOCUMENTED_UNITTEST_COMMAND_RE = re.compile(
+    r"(?<![\w.-])(?:py|python|python3)\s+-m\s+unittest(?=$|[\s`])",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def detect_documented_test_frameworks(*documents: str) -> list[str]:
+    """Detect test runners from explicit commands in captured task text."""
+
+    if any(DOCUMENTED_UNITTEST_COMMAND_RE.search(document) for document in documents):
+        return ["python-unittest"]
+    return []
+
+
+def merge_documented_test_frameworks(
+    signals: dict[str, Any],
+    *documents: str,
+) -> dict[str, Any]:
+    """Return project signals extended by deterministic documented commands."""
+
+    merged = dict(signals)
+    frameworks = list(signals.get("detected_test_frameworks", []))
+    for framework in detect_documented_test_frameworks(*documents):
+        if framework not in frameworks:
+            frameworks.append(framework)
+    merged["detected_test_frameworks"] = frameworks
+    return merged
 
 
 def detect_project_signals(root: Path) -> dict[str, Any]:

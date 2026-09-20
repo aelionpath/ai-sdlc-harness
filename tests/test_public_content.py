@@ -195,7 +195,7 @@ def test_public_guidance_explains_the_agent_harness_and_developer_roles():
     flow = (ROOT / "docs/harness-flow.md").read_text(encoding="utf-8")
     cli_reference = (ROOT / "docs/cli-reference.md").read_text(encoding="utf-8")
 
-    assert "The coding agent does the work. Harness constrains, guides, and records the workflow." in readme
+    assert "The coding agent does the work. Harness structures, guides, and records the workflow." in readme
     assert "Coding agent = executor" in readme
     assert "Developer = authority" in readme
     assert "without asking for approval after every command" in readme
@@ -208,6 +208,64 @@ def test_public_guidance_explains_the_agent_harness_and_developer_roles():
     assert "human must manually author every artifact" in concepts
     assert "does not call, launch, or orchestrate the agent" in flow
     assert "The coding agent, not Harness, performs those actions" in cli_reference
+
+
+def test_public_guidance_explains_the_runtime_trust_boundary():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    concepts = (ROOT / "docs/concepts.md").read_text(encoding="utf-8")
+
+    assert "AI SDLC Harness is a control layer, not a security sandbox." in readme
+    assert "Harness boundaries are not security boundaries." in readme
+    assert "do not provide hard runtime enforcement" in readme
+    assert "where technical prevention is required" in readme
+    assert "the agent runtime determines what execution is technically possible" in readme
+    assert "what work is intended, current, and reviewable" in readme
+
+    assert "## Trust Boundary" in concepts
+    assert "not a security sandbox or runtime reference monitor" in concepts
+    assert "workflow and authority boundaries are not security boundaries" in concepts
+    assert "Harness defines and maintains the intended operating envelope." in concepts
+    assert "Platform and security controls enforce what must be technically impossible." in concepts
+    assert "runtime and platform controls determine what execution is technically possible" in concepts
+    assert "what work is intended, current, bounded, and reviewable" in concepts
+    for platform_control in (
+        "filesystem and process permissions",
+        "least-privilege credentials and secret isolation",
+        "repository permissions and branch protections",
+        "CI/CD policy and protected deployment environments",
+        "network restrictions",
+        "execution isolation",
+    ):
+        assert platform_control in concepts
+
+
+def test_public_compatibility_distinguishes_support_from_real_agent_validation():
+    readme_path = ROOT / "README.md"
+    compatibility_path = ROOT / "docs/compatibility.md"
+    readme = readme_path.read_text(encoding="utf-8")
+    compatibility = compatibility_path.read_text(encoding="utf-8")
+
+    assert "[Compatibility](docs/compatibility.md)" in readme
+    assert compatibility_path.is_file()
+    for agent in ("Codex", "Claude Code", "Gemini CLI"):
+        assert f"{agent} | **SUPPORTED**" in compatibility
+    assert "**SUPPORTED** — Harness ships a first-party integration" in compatibility
+    assert "Support does not by itself claim that a real-agent E2E run has been performed" in compatibility
+    assert "**VALIDATED** — additional real-agent testing has been performed and is maintained as project validation" in compatibility
+    assert "**COMMUNITY VALIDATED** — real-agent testing has been performed by an external user or contributor" in compatibility
+    assert "Community validation is a legitimate compatibility signal" in compatibility
+    assert "Codex | **SUPPORTED**" in compatibility
+    assert "**VALIDATED** — manual full E2E is the v1 reference validation path" in compatibility
+    assert compatibility.count("No additional real-agent validation is claimed yet") == 2
+    for agent in ("Claude Code", "Gemini CLI"):
+        matrix_row = next(line for line in compatibility.splitlines() if line.startswith(f"| {agent} |"))
+        assert "**COMMUNITY VALIDATED**" not in matrix_row
+    for path in (
+        ".agents/skills/ai-sdlc-harness/SKILL.md",
+        ".claude/skills/ai-sdlc-harness/SKILL.md",
+        ".gemini/skills/ai-sdlc-harness/SKILL.md",
+    ):
+        assert f"`{path}`" in compatibility
 
 
 def test_public_documentation_images_are_approved_and_resolve():

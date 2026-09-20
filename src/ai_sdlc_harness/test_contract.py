@@ -9,7 +9,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
 from .constants import TEST_CONTRACT_REVIEW_FILENAME, TASK_SLUG_PATTERN
-from .detect import detect_project_signals
+from .detect import detect_project_signals, merge_documented_test_frameworks
 from .files import (
     persist_exact_bytes,
     resolve_managed_output_under_root,
@@ -439,7 +439,9 @@ def _findings(
         findings.append(Finding("warning", f"evidence expectations are {evidence_sections['evidence'].message}."))
 
     if not signals.get("detected_test_frameworks"):
-        findings.append(Finding("warning", "no test framework detected."))
+        findings.append(
+            Finding("warning", "no recognized test-framework signal detected.")
+        )
     if not signals.get("detected_ci"):
         findings.append(Finding("warning", "no CI detected."))
 
@@ -658,7 +660,6 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
     except Exception as exc:
         return 1, [f"Could not snapshot test-contract provenance inputs: {exc}"]
 
-    signals = detect_project_signals(root)
     acceptance = _read_input(task_slug, "acceptance.md", captured_by_path)
     test_contract = _read_input(
         task_slug,
@@ -672,6 +673,11 @@ def run_test_contract_review(root: Path, task_slug: str, *, dry_run: bool = Fals
     )
     evidence = _read_input(task_slug, "evidence.md", captured_by_path)
     preflight = _read_input(task_slug, "preflight.md", captured_by_path)
+    signals = merge_documented_test_frameworks(
+        detect_project_signals(root),
+        test_contract.text,
+        verification_input.text,
+    )
     acceptance_sections = _acceptance_sections(acceptance)
     test_sections = _all_test_contract_sections(test_contract)
     verification_sections = _verification_sections(verification_input)

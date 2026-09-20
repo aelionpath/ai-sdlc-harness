@@ -480,7 +480,16 @@ def _report_findings(readiness_artifacts: list[ArtifactStatus]) -> list[ReportFi
     for item in readiness_artifacts:
         if not item.present or not item.readable:
             continue
+        in_findings = False
         for line in item.text.splitlines():
+            if line.startswith("## "):
+                heading = line[3:].strip().casefold()
+                if in_findings:
+                    break
+                in_findings = heading == "findings"
+                continue
+            if not in_findings:
+                continue
             match = FINDING_LINE_RE.match(line)
             if not match:
                 continue
@@ -525,7 +534,6 @@ def _build_findings(
     trace_sections: dict[str, SectionEvidence],
     todo_sources: list[str],
     readiness_artifacts: list[ArtifactStatus],
-    report_findings: list[ReportFinding],
     manifest_entries: list[ManifestTaskEntry],
     report_path_text: str,
 ) -> list[Finding]:
@@ -597,12 +605,6 @@ def _build_findings(
             findings.append(Finding("warning", f"{item.filename} is missing."))
         elif not item.readable:
             findings.append(Finding("warning", f"{item.filename} is unreadable."))
-
-    for report_finding in report_findings:
-        if report_finding.level in {"blocker", "warning"}:
-            findings.append(
-                Finding("warning", f"{report_finding.source} reported {report_finding.level}: {report_finding.message}")
-            )
 
     for entry in manifest_entries:
         if entry.path == report_path_text:
@@ -749,7 +751,7 @@ def _render_report(
     else:
         lines.append("- none recorded for this task")
 
-    lines.extend(["", "## Prior Report Signals", ""])
+    lines.extend(["", "## Prior Report Observations", ""])
     lines.extend(_render_status_line(item) for item in readiness_artifacts)
     lines.append("")
     if report_findings:
@@ -837,7 +839,6 @@ def run_evidence(root: Path, task_slug: str, *, dry_run: bool = False, force: bo
         trace_sections=trace_sections,
         todo_sources=todo_sources,
         readiness_artifacts=readiness_artifacts,
-        report_findings=report_findings,
         manifest_entries=manifest_entries,
         report_path_text=path_text,
     )

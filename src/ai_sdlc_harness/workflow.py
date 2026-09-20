@@ -928,7 +928,7 @@ def resolve_workflow_state(
         context_manifest=context_state,
         evidence_report=evidence_state,
         validation_currentness=currentness.state,
-        integrity_clean=None,
+        integrity_clean=True,
     )
     validate_command = f"ai-sdlc validate --task {selected_task}"
     if currentness.state in {
@@ -1004,7 +1004,12 @@ def resolve_workflow_state(
             **semantic_common,
             phase=WorkflowPhase.REVIEW,
             outcome=WorkflowOutcomeCategory.REVIEW_REQUIRED,
-            next_actions=(_human("Review and resolve or accept the validation warnings."),),
+            next_actions=(
+                _human(
+                    "Review and resolve or accept the current validation "
+                    + ("warning." if inspection.warning_count == 1 else "warnings.")
+                ),
+            ),
             findings=semantic_findings,
         )
 

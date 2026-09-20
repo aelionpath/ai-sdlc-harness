@@ -238,7 +238,7 @@ def test_evidence_creates_report_with_readiness_signals_and_manifest_entry(proje
         "## Test / Verification Evidence",
         "## Deviations, Gaps, And Risks",
         "## Supporting Artifacts",
-        "## Prior Report Signals",
+        "## Prior Report Observations",
         "## Findings",
         "## Recommended Next Actions",
         "## Disclaimer",
@@ -516,15 +516,18 @@ Tests passed in 1.00s.
     assert "warning: not-run or skipped commands are recorded without rationale." not in text
 
 
-def test_evidence_copies_prior_report_findings_as_warnings(project_tmp):
+def test_evidence_preserves_prior_report_observations_without_promoting_them(project_tmp):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     _task_path(project_tmp, slug, "preflight.md").write_text(
-        "- blocker: implementation boundary is missing.\n",
+        "# Preflight Report\n\n## Summary\n\n- Info: 4\n\n"
+        "## Findings\n\n- blocker: implementation boundary is missing.\n",
         encoding="utf-8",
     )
     _task_path(project_tmp, slug, "test-contract-review.md").write_text(
-        "- warning: expected checks are unclear.\n",
+        "# Test-Contract Readiness Review\n\n"
+        "- warning: excerpt text is not a finding.\n\n"
+        "## Findings\n\n- warning: expected checks are unclear.\n",
         encoding="utf-8",
     )
 
@@ -534,8 +537,13 @@ def test_evidence_copies_prior_report_findings_as_warnings(project_tmp):
     assert code == 0
     assert "`preflight.md`: blocker: implementation boundary is missing." in text
     assert "`test-contract-review.md`: warning: expected checks are unclear." in text
-    assert "warning: preflight.md reported blocker: implementation boundary is missing." in text
-    assert "warning: test-contract-review.md reported warning: expected checks are unclear." in text
+    findings = text.split("## Findings", 1)[1].split("## Recommended", 1)[0]
+    assert "reported blocker: implementation boundary is missing" not in findings
+    assert "reported warning: expected checks are unclear" not in findings
+    assert "Info: 4" not in text.split("## Prior Report Observations", 1)[1]
+    assert "excerpt text is not a finding" not in text.split(
+        "## Prior Report Observations", 1
+    )[1]
 
 
 def test_evidence_warns_when_generated_workset_is_missing(project_tmp):

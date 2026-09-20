@@ -294,7 +294,7 @@ def test_preflight_creates_report_with_signals_packs_and_readiness(project_tmp):
     assert "warning: security/privacy risk surface is unknown or still TODO." in text
     assert "warning: test intent is missing or still TODO." in text
     assert "warning: no verification commands or checks are recorded as run." in text
-    assert "warning: no test framework detected." in text
+    assert "warning: no recognized test-framework signal detected." in text
     assert "warning: no CI detected." in text
     assert "info: preflight uses shallow section and marker-based checks only." in text
     assert "info: preflight does not call AI models, scan security, run tests, validate compliance, or enforce packs." in text
@@ -336,6 +336,25 @@ def test_preflight_creates_report_with_signals_packs_and_readiness(project_tmp):
         ]
     )
     assert "generated_at" not in record
+
+
+def test_preflight_recognizes_documented_unittest_without_repository_test_markers(
+    project_tmp,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_boundary_ready_task(project_tmp, slug)
+    _task_path(project_tmp, slug, "verification.md").write_text(
+        "# Verification\n\n## Commands And Tests To Run\n\npy -m unittest -v\n",
+        encoding="utf-8",
+    )
+
+    code, _ = run_preflight(project_tmp, slug)
+
+    text = _preflight_path(project_tmp, slug).read_text(encoding="utf-8")
+    assert code == 0
+    assert "Detected test frameworks: python-unittest" in text
+    assert "no recognized test-framework signal detected" not in text
+    assert "warning: no CI detected." in text
 
 
 def test_preflight_reports_no_boundary_blockers_when_key_sections_are_filled(project_tmp):

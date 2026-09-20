@@ -2,7 +2,7 @@
 
 AI SDLC Harness is a repo-local workflow for bounded, reviewable AI-assisted software changes. It turns a rough request into explicit task artifacts, a task-scoped implementation handoff, factual evidence, and deterministic workflow status that humans and coding agents can follow.
 
-The coding agent does the work. Harness constrains, guides, and records the workflow. The developer remains the authority over intent, consequential decisions, and acceptance.
+The coding agent does the work. Harness structures, guides, and records the workflow. The developer remains the authority over intent, consequential decisions, and acceptance.
 
 ```text
 Coding agent = executor
@@ -10,7 +10,13 @@ Harness = control layer
 Developer = authority
 ```
 
+AI SDLC Harness provides first-party, repository-scoped integrations for Codex, Claude Code, and Gemini CLI while remaining agent-neutral. See [Compatibility](docs/compatibility.md) for detailed support and validation status.
+
 The Harness does not call an AI model or implement the task. It supplies the control layer around that work: scope, acceptance criteria, test intent, current generated context, integrity checks, and visible human-review boundaries.
+
+AI SDLC Harness is a control layer, not a security sandbox. Harness boundaries are not security boundaries. It structures intent, context, workflow state, verification, and human decision points so coding agents have explicit workflow and authority boundaries. Those boundaries guide the intended development process but do not provide hard runtime enforcement. Use platform controls such as permissions, sandboxing, branch protections, CI/CD policy, and execution isolation where technical prevention is required.
+
+The two layers are complementary: the agent runtime determines what execution is technically possible; the Harness makes explicit what work is intended, current, and reviewable.
 
 With a repository Agent Skill installed, a coding agent can use Harness status as its workflow navigator, work from the current bounded handoff, record factual evidence and verification, and continue through routine safe steps without asking for approval after every command. It should stop when a real human decision is required, necessary information is unavailable, scope or intent is consequentially ambiguous, or Harness reports a blocking condition.
 

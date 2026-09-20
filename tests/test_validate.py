@@ -284,7 +284,8 @@ def test_validate_creates_report_with_review_signals_and_manifest_entry(project_
     assert "## Workflow Signals" in text
     assert "## Task Artifact Readiness" in text
     assert "`task.md`: present=yes; readable=yes" in text
-    assert "## Prior Report Findings" in text
+    assert "## Prior Report Observations" in text
+    assert "excluded from current blocker/warning counts" in text
     assert "`preflight.md`: present=yes; readable=yes" in text
     assert "`spec.md`: present=no; readable=no" in text
     assert "`requirements.yaml`: present=no; readable=no" in text
@@ -333,7 +334,7 @@ def test_validate_generates_report_with_blockers_for_missing_or_todo_inputs(proj
     assert "blocker: no usable evidence and no usable verification content are available." in text
 
 
-def test_validate_labels_and_deduplicates_copied_prior_report_findings(project_tmp):
+def test_validate_keeps_prior_observations_out_of_current_findings(project_tmp):
     slug = _start_sample_task(project_tmp)
     _fill_task_inputs(project_tmp, slug)
     _add_repo_signals(project_tmp)
@@ -341,28 +342,32 @@ def test_validate_labels_and_deduplicates_copied_prior_report_findings(project_t
         project_tmp,
         slug,
         findings={
-            "preflight.md": "- blocker: boundary issue remains.\n- warning: shared issue remains.\n- info: preflight noted context.\n",
-            "test-contract-review.md": "- warning: shared issue remains.\n",
-            "evidence-report.md": "- warning: evidence issue remains.\n",
-            "generated/agent-workset.md": "- blocker: generated workset blocker.\n",
+            "preflight.md": "# Preflight Report\n\n## Findings\n\n- blocker: boundary issue remains.\n- warning: shared issue remains.\n- info: preflight noted context.\n",
+            "test-contract-review.md": "# Test-Contract Readiness Review\n\n## Findings\n\n- warning: shared issue remains.\n",
+            "evidence-report.md": "# Evidence Report\n\n## Findings\n\n- warning: evidence issue remains.\n",
+            "generated/agent-workset.md": "# Agent Workset\n\n## Findings\n\n- blocker: generated workset blocker.\n",
         },
     )
+    _write_spec_output(project_tmp, slug)
+    _write_requirements_output(project_tmp, slug)
 
     code, _ = run_validate(project_tmp, slug)
 
     text = _report_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert "- Review-readiness answer: No" in text
+    assert "- Review-readiness answer: Yes" in text
     assert text.count("shared issue remains.") == 2
     assert "`preflight.md`: blocker: boundary issue remains." in text
     assert "`preflight.md`: warning: shared issue remains." in text
-    assert "`test-contract-review.md`: warning: shared issue remains." not in text
+    assert "`test-contract-review.md`: warning: shared issue remains." in text
     assert "`preflight.md`: info: preflight noted context." in text
     assert "`evidence-report.md`: warning: evidence issue remains." in text
-    assert "- blocker: preflight.md reported blocker: boundary issue remains." in text
-    assert "- warning: preflight.md reported warning: shared issue remains." in text
-    assert "- warning: evidence-report.md reported warning: evidence issue remains." in text
-    assert "- info: preflight.md reported info: preflight noted context." in text
+    current_findings = text.split("## Findings", 1)[1].split(
+        "## Recommended Next Actions", 1
+    )[0]
+    assert "boundary issue remains" not in current_findings
+    assert "shared issue remains" not in current_findings
+    assert "evidence issue remains" not in current_findings
     assert "generated workset blocker" not in text
 
 
@@ -812,9 +817,13 @@ def test_validate_report_counts_and_clean_state_match_inspection_result(
 
     text = _report_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert f"- Blockers: {expected.blocker_count}" in text
-    assert f"- Warnings: {expected.warning_count}" in text
-    assert f"- Info: {expected.info_count}" in text
+    assert f"- Current blockers: {expected.blocker_count}" in text
+    assert f"- Current warnings: {expected.warning_count}" in text
+    assert f"- Current info: {expected.info_count}" in text
+    assert (
+        f"- Prior report observations shown: {len(expected.report_findings)} "
+        "(excluded from current counts)"
+    ) in text
     assert f"- CLEAN: {'yes' if expected.clean else 'no'}" in text
     assert f"- Review-readiness answer: {expected.review_readiness}" in text
     assert (

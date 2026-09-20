@@ -357,7 +357,7 @@ def test_test_contract_warns_for_missing_ci_framework_and_unfilled_sections(proj
 
     text = _review_path(project_tmp, slug).read_text(encoding="utf-8")
     assert code == 0
-    assert "warning: no test framework detected." in text
+    assert "warning: no recognized test-framework signal detected." in text
     assert "warning: no CI detected." in text
     assert "warning: protected behavior / non-goals are TODO-only." in text
     assert "warning: characterization tests are TODO-only." in text
@@ -369,6 +369,25 @@ def test_test_contract_warns_for_missing_ci_framework_and_unfilled_sections(proj
     assert "blocker: requirements / acceptance criteria are TODO-only." in text
     assert "blocker: desired behavior tests are TODO-only." in text
     assert "blocker: no usable acceptance or test-contract content is available." in text
+
+
+def test_test_contract_recognizes_documented_unittest_without_repository_test_markers(
+    project_tmp,
+):
+    slug = _start_sample_task(project_tmp)
+    _fill_test_inputs(project_tmp, slug)
+    _task_path(project_tmp, slug, "verification.md").write_text(
+        "# Verification\n\n## Commands And Checks Run\n\npython -m unittest\n",
+        encoding="utf-8",
+    )
+
+    code, _ = run_test_contract_review(project_tmp, slug)
+
+    text = _review_path(project_tmp, slug).read_text(encoding="utf-8")
+    assert code == 0
+    assert "Detected test frameworks: python-unittest" in text
+    assert "no recognized test-framework signal detected" not in text
+    assert "warning: no CI detected." in text
 
 
 def test_test_contract_reports_missing_empty_and_unreadable_inputs_as_findings(project_tmp):
